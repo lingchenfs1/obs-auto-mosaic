@@ -968,12 +968,19 @@ void draw_region(FaceMosaic *f, gs_texture_t *tex, uint32_t w, uint32_t h, int x
 	vec4_set(&color, 0.0f, 0.0f, 0.0f, 1.0f);
 	gs_effect_set_vec4(gs_effect_get_param_by_name(f->effect, "color"), &color);
 
-	const char *tech = f->mode == 1 ? "Solid" : "Pixelate";
+	// 黑色遮挡：直接覆盖（不与底下画面混合），保证 100% 不透明纯黑
+	const bool solid = f->mode == 1;
+	if (solid) {
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+	}
 	gs_matrix_push();
 	gs_matrix_translate3f((float)x0, (float)y0, 0.0f);
-	while (gs_effect_loop(f->effect, tech))
+	while (gs_effect_loop(f->effect, solid ? "Solid" : "Pixelate"))
 		gs_draw_sprite_subregion(tex, 0, x0, y0, x1 - x0, y1 - y0);
 	gs_matrix_pop();
+	if (solid)
+		gs_blend_state_pop();
 }
 
 void draw_plain(gs_texture_t *tex, uint32_t w, uint32_t h)
