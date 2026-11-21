@@ -288,7 +288,8 @@ struct FaceMosaic {
 	uint64_t rstat_start_ns = 0;
 	int rstat_frames = 0;
 	int rstat_aligned = 0; // 输出帧前后都有检测结果（真正对齐）的帧数
-	int rstat_fullscreen = 0;
+	int rstat_fullscreen = 0; // 兜底（检测停顿）导致的整屏
+	int rstat_exposed = 0;    // 「检测到暴露部位时整屏打码」导致的整屏
 };
 
 // 新检测结果和同类别的旧框匹配：IoU 足够大，或者中心距离不超过框尺寸（快速移动时 IoU 可能为 0）
@@ -765,6 +766,13 @@ void fm_destroy(void *data)
 	delete f;
 }
 
+// 从时刻 t 到 now 过了多久。t 可能由推理线程在渲染线程取 now 之后才写入（比 now 还晚），
+// 这时按 0 算：直接相减是无符号下溢，会变成巨大的数，被误判为「超时」而整屏打码（黑色模式下就是整屏闪黑）。
+uint64_t elapsed_ns(uint64_t now, uint64_t t)
+{
+	return t >= now ? 0 : now - t;
+}
+
 void fm_tick(void *data, float)
 {
 	static_cast<FaceMosaic *>(data)->new_frame = true;
@@ -1186,7 +1194,7 @@ void fm_video_render(void *data, gs_effect_t *)
 		collect_stage(f, f->cap_small);
 		collect_stage(f, f->cap_text);
 		gs_texture_t *latest = gs_texrender_get_texture(f->ring[idx]);
-		if (now - f->cap_small.last_capture_ns >= f->detect_interval_ns) {
+		if (elapsed_ns(now, f->cap_small.last_capture_ns) >= f->detect_interval_ns) {
 			uint32_t targets = 0;
 			for (int k = 0; k < CH_COUNT; k++) {
 				Channel &c = f->ch[k];
@@ -1202,7 +1210,8 @@ void fm_video_render(void *data, gs_effect_t *)
 			}
 		}
 		Channel &tc = f->ch[CH_TEXT];
-		if (tc.enabled && tc.model_ok && !tc.busy && now - f->cap_text.last_capture_ns >= f->text_interval_ns) {
+		if (tc.enabled && tc.model_ok && !tc.busy &&
+		    elapsed_ns(now, f->cap_text.last_capture_ns) >= f->text_interval_ns) {
 			tc.busy = true;
 			tc.last_job_ns = now;
 			f->cap_text.last_capture_ns = now;
@@ -1238,9 +1247,9 @@ void fm_video_render(void *data, gs_effect_t *)
 			continue;
 		uint64_t last = c.last_result_ns;
 		uint64_t stall_ns = (c.kind == CH_TEXT ? kTextStallMs : kStallMs) * 1000000ULL;
-		bool st = !c.model_ok || last == 0 || now - last > stall_ns;
+		bool st = !c.model_ok || last == 0 || elapsed_ns(now, last) > stall_ns;
 		// 推理线程可能还在处理被丢弃的旧任务，超时后允许重新提交
-		if (st && c.busy && now - c.last_job_ns > stall_ns)
+		if (st && c.busy && elapsed_ns(now, c.last_job_ns) > stall_ns)
 			c.busy = false;
 		stalled = stalled || st;
 
@@ -1254,24 +1263,30 @@ void fm_video_render(void *data, gs_effect_t *)
 		boxes.insert(boxes.end(), part.begin(), part.end());
 	}
 
-	bool full_screen = (stalled && f->fail_safe) || (exposed && f->nude_action == 1);
+	bool by_stall = stalled && f->fail_safe;
+	bool by_exposed = exposed && f->nude_action == 1;
+	bool full_screen = by_stall || by_exposed;
 	draw_output(f, tex, w, h, boxes, full_screen);
 	dump_frames(f, tex, w, h, boxes, full_screen, stalled, out_seq, now);
 
 	if (fresh && aligned_all)
 		f->rstat_aligned++;
-	if (fresh && full_screen)
+	if (fresh && by_stall)
 		f->rstat_fullscreen++;
-	if (now - f->rstat_start_ns > 10ULL * 1000000000ULL) {
+	if (fresh && by_exposed && !by_stall)
+		f->rstat_exposed++;
+	if (elapsed_ns(now, f->rstat_start_ns) > 10ULL * 1000000000ULL) {
 		if (f->rstat_frames > 0)
 			blog(LOG_INFO,
-			     "[face-mosaic] 最近 10 秒：输出 %d 帧，延迟 %d 帧（%d ms），前后都有检测结果的帧 %.0f%%，整屏打码 %d 帧",
+			     "[face-mosaic] 最近 10 秒：输出 %d 帧，延迟 %d 帧（%d ms），前后都有检测结果的帧 %.0f%%，"
+			     "兜底整屏 %d 帧，检测到暴露整屏 %d 帧",
 			     f->rstat_frames, (int)ring_size - 1, f->delay_ms,
-			     100.0 * f->rstat_aligned / f->rstat_frames, f->rstat_fullscreen);
+			     100.0 * f->rstat_aligned / f->rstat_frames, f->rstat_fullscreen, f->rstat_exposed);
 		f->rstat_start_ns = now;
 		f->rstat_frames = 0;
 		f->rstat_aligned = 0;
 		f->rstat_fullscreen = 0;
+		f->rstat_exposed = 0;
 	}
 }
 

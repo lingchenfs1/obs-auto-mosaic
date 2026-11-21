@@ -61,6 +61,8 @@ sleep 10
 c2="$(cpu_seconds "${pid}")"
 awk -v a="${c1}" -v b="${c2}" 'BEGIN{printf "OBS 进程 CPU：%.1f%%（10 秒平均，100%% = 1 个核）\n", (b-a)*10}'
 
+# 环境变量 EXTRA_WAIT：测完 CPU 后再多跑几秒（统计更多 10 秒时段）
+sleep "${EXTRA_WAIT:-0}"
 osascript -e 'quit app "OBS"' >/dev/null 2>&1 || true
 for _ in $(seq 1 15); do
 	pgrep -x OBS >/dev/null || break
@@ -72,4 +74,4 @@ if pgrep -x OBS >/dev/null; then
 fi
 
 log="$(ls -t "${OBS_CFG}/logs/"*.txt | head -1)"
-grep "face-mosaic" "${log}" | grep -v "调试帧已导出" | tail -8
+grep "face-mosaic" "${log}" | grep -v "调试帧已导出" | tail -"${LOG_LINES:-8}"

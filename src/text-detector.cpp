@@ -184,7 +184,9 @@ bool TextDetector::load(const std::string &det_model, const std::string &rec_mod
 {
 	try {
 		impl_->det = make_session(ort_env(), det_model, 1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
-		impl_->rec = make_session(ort_env(), rec_model, 1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly);
+		// 识别模型每一行的输入宽度都不同：CoreML / DirectML 遇到新尺寸要重新编译，首次识别会慢到触发兜底整屏，
+		// 实测用 CPU 速度相当，所以识别固定用 CPU；检测模型输入尺寸固定，照常用 GPU。
+		impl_->rec = make_session(ort_env(), rec_model, 1, OrtAccel::CpuOnly);
 
 		// 字典在识别模型的元数据里，每行一个字
 		Ort::AllocatorWithDefaultOptions alloc;
