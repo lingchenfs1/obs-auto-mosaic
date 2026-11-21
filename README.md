@@ -1,13 +1,14 @@
 # obs-auto-mosaic：OBS 自动马赛克滤镜
 
-给 OBS 里任意视频源加一个「自动马赛克」滤镜：检测到不雅部位、大面积裸露皮肤或人脸，就自动打码（马赛克或纯色块）。目前只在 macOS（Apple Silicon）+ OBS 33.0.1 上构建和测试过。
+给 OBS 里任意视频源加一个「自动马赛克」滤镜：检测到不雅部位、大面积裸露皮肤、敏感文字或人脸，就自动打码（马赛克或纯色块）。目前只在 macOS（Apple Silicon）+ OBS 33.0.1 上构建和测试过。
 
-三个检测通道，各自在独立线程里推理，可分别开关：
+四个检测通道，各自在独立线程里推理，可分别开关：
 
 | 通道 | 模型 | 作用 |
 |---|---|---|
 | 不雅内容 | [NudeNet](https://github.com/notAI-tech/NudeNet) v3（`320n.onnx` 快速 / `640m.onnx` 精确） | 识别暴露的胸部、生殖器、臀部等 18 类部位 |
 | 裸露皮肤 | [PP-HumanSeg](https://github.com/opencv/opencv_zoo/tree/main/models/human_segmentation_pphumanseg) 人体分割 + 肤色 | 补 NudeNet 的漏检：健美、泳装、光膀子、背影 |
+| 敏感文字 | [PP-OCRv4](https://github.com/PaddlePaddle/PaddleOCR)（[RapidOCR](https://github.com/RapidAI/RapidOCR) 导出的 ONNX） | 手机号、身份证号、银行卡号、邮箱、网址、微信 / QQ 号，以及自定义关键词 |
 | 人脸 | [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) | 给路人等人脸打码 |
 
 推理用 [ONNX Runtime](https://onnxruntime.ai/)（CPU），打码用 GPU 着色器。
@@ -46,11 +47,30 @@
 | 红蓝条纹球衣 | 28% | 0% | 不算 |
 | 密集人群 | 30% | 37% | 不算 |
 
+## 敏感文字通道
+
+- 单独采集一份高分辨率画面（长边 1920 以内），默认每秒 3 次；文字检测分辨率可选 640 / 800 / 960 / 1280（默认 800）。
+- 检测出的文字行（只处理横排）逐行识别，同一位置、内容没变的行用缓存，不重复识别。
+- 识别结果规整（去空格、全角转半角、转小写）后按规则匹配，命中的**整行**打码：
+
+| 规则 | 匹配方式 |
+|---|---|
+| 手机号 | `1[3-9]` 开头的 11 位数字（前后不是数字） |
+| 身份证号 | 18 位，含出生日期格式校验，末位可为 X |
+| 银行卡号 | 16~19 位连续数字（去空格后） |
+| 邮箱、网址 | 常见格式；网址含 `http(s)://`、`www.` 和常见后缀 |
+| 微信 / QQ 号 | 「微信 / vx / wx / QQ / 扣扣」等后面紧跟 5 位以上的账号 |
+| 自定义关键词 | 设置里每行一个（或逗号分隔），包含即命中 |
+
+- **识别出的文字不会写进 OBS 日志**（日志常被上传分享），日志里只有行数和耗时。
+- 测试画面（`tools/make-text-test.py` 生成，1920×1080，18~34 号字）：8 行敏感信息全部命中，4 行普通文字（含「游戏时长 02:35:17 分数 98765」）没有误伤。M4 上每次约 80 ms（有缓存时；首次约 270 ms）。
+
 ## 已知局限
 
 - 只用非露骨的公开照片（健美、沙滩排球、穿衣服的人像）测试过；**真正露骨的类别没有验证**，请用自己的素材测试后再用于直播。
 - NudeNet 主要按色情内容训练，对健美、背影识别差，这部分靠「裸露皮肤」通道补；远景里很小的人（约 20 像素高）两个通道都检不出。
 - 肤色和皮肤相近的衣服（米色、肉色）会抬高皮肤占比；露背装、短裤短裙等介于两者之间的情况没测过，可能需要按实际画面调门槛。
+- 文字通道每秒只检测几次，新出现的文字可能要几百毫秒才被遮住；竖排、倾斜、艺术字、很小的字（低于约 12 像素）可能认不出；号码被拆成多行或中间夹了其他字符时规则匹配不到。
 - 人脸打码默认开启：如果是自己出镜直播，记得关掉，否则自己的脸也会被打码。
 - 只支持 macOS Apple Silicon，Windows 还没做。
 
@@ -91,8 +111,9 @@ cmake --build build --target install-plugin
 | 人脸 | 约 13 ms |
 | 裸露皮肤 | 约 27 ms |
 | 不雅内容（320n） | 约 33 ms |
+| 敏感文字（每秒 3 次） | 约 80 ms |
 
-三个通道全开时 OBS 进程约占 1.3 个核（含视频解码等 OBS 自身开销）。ONNX Runtime 默认的「2 线程 + 自旋等待」会让 OBS 涨到 2.3~2.7 个核，所以改成了每个模型 1 个线程。调低「每秒检测次数」可以进一步降低占用。
+前三个通道全开时 OBS 进程约占 1.3 个核，加上文字通道约 1.35 个核（含视频解码等 OBS 自身开销）。ONNX Runtime 默认的「2 线程 + 自旋等待」会让 OBS 涨到 2.3~2.7 个核，所以改成了每个模型 1 个线程。调低「每秒检测次数」可以进一步降低占用。
 
 精确模型 `640m` 每次 100~200 ms，需要把画面延迟调到 300 ms 以上。
 
@@ -114,6 +135,10 @@ tools/fetch-test-assets.sh
 
 ```bash
 ./build/detect-test data/face_detection_yunet_2023mar.onnx test/group.jpg out.png
+```
+
+```bash
+./build/text-test data/ocr/ch_PP-OCRv4_det_infer.onnx data/ocr/ch_PP-OCRv4_rec_infer.onnx test/text-sample.png out.png "测试敏感词"
 ```
 
 在 OBS 里自动实测（会临时切换场景集合，并在结束后恢复 OBS 的 `user.ini`、`global.ini`）：
@@ -142,7 +167,7 @@ python3 -I tools/check-dumps.py "$PWD/build/detect-test" "$PWD/data/face_detecti
 - 延迟对齐时自动同步音频（现在需要手动设同步偏移）
 - 摄像头实测；Windows 构建；CoreML / DirectML 加速
 - 远处小人、小脸：分块检测
-- 其他敏感内容：窗口区域遮挡、OCR 关键词、二维码
+- 其他敏感内容：窗口区域遮挡、二维码；文字只遮命中的那几个字而不是整行
 
 ## 许可证
 
@@ -152,6 +177,7 @@ python3 -I tools/check-dumps.py "$PWD/build/detect-test" "$PWD/data/face_detecti
 |---|---|
 | NudeNet 模型 | AGPL-3.0 |
 | YuNet、PP-HumanSeg（opencv_zoo） | MIT、Apache-2.0 |
+| PP-OCRv4（PaddleOCR / RapidOCR） | Apache-2.0 |
 | ONNX Runtime | MIT |
 | stb_image / stb_image_write（`third_party/stb`） | MIT 或 Public Domain |
 | libobs 头文件 | GPL-2.0-or-later |

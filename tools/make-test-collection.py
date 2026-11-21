@@ -20,7 +20,12 @@ def main():
         if v in ("true", "false"):
             settings[k] = v == "true"
         else:
-            settings[k] = float(v) if "." in v else int(v)
+            for conv in (int, float, str):
+                try:
+                    settings[k] = conv(v)
+                    break
+                except ValueError:
+                    pass
     is_image = video.lower().endswith((".jpg", ".jpeg", ".png"))
     source = ({"id": "image_source", "versioned_id": "image_source", "settings": {"file": video}} if is_image else
               {"id": "ffmpeg_source", "versioned_id": "ffmpeg_source",

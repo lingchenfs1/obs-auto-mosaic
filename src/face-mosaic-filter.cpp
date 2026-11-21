@@ -1,7 +1,8 @@
-// 自动马赛克滤镜：人脸 + 不雅内容（NudeNet）+ 裸露皮肤（人体分割 + 肤色）
+// 自动马赛克滤镜：人脸 + 不雅内容（NudeNet）+ 裸露皮肤（人体分割 + 肤色）+ 敏感文字（PP-OCRv4）
 //
-// 检测通道：人脸（YuNet）、不雅内容（NudeNet 320n / 640m）、裸露皮肤（PP-HumanSeg + 肤色）
-// 各有一个推理线程、自己的检测历史，慢的通道不拖慢快的。
+// 检测通道：人脸（YuNet）、不雅内容（NudeNet 320n / 640m）、裸露皮肤（PP-HumanSeg + 肤色）、
+// 敏感文字（PP-OCR 检测 + 识别 + 规则 / 关键词）各有一个推理线程、自己的检测历史，慢的通道不拖慢快的。
+// 前三个通道共用一份缩到 640 以内的画面；文字通道单独采集一份高分辨率（长边 1920 以内）画面。
 //
 // 每个新帧（渲染线程，video_tick 标记新帧，同一帧被多处渲染时只处理一次）：
 //   1. 上游画面渲染进环形缓冲 ring[frame_seq % N]，N = 延迟帧数 + 1
@@ -23,6 +24,7 @@
 #include "face-detector.hpp"
 #include "nude-detector.hpp"
 #include "skin-detector.hpp"
+#include "text-detector.hpp"
 
 #include "stb_image_write.h"
 
@@ -40,6 +42,8 @@
 namespace {
 
 constexpr uint64_t kStallMs = 1000;
+constexpr uint64_t kTextStallMs = 3000; // 文字通道一次 OCR 可能要几百毫秒，兜底等久一点
+constexpr uint32_t kTextCaptureMax = 1920;
 constexpr int kMaxDetectSize = FaceDetector::kInputSize;
 
 const char *kEffectSource = R"(
@@ -110,9 +114,10 @@ technique Solid
 constexpr size_t kMaxHistory = 256;
 constexpr int kMaxDelayFrames = 60;
 
-enum ChannelKind { CH_FACE = 0, CH_NUDE = 1, CH_SKIN = 2, CH_COUNT = 3 };
-const char *kChannelName[CH_COUNT] = {"人脸", "不雅内容", "裸露皮肤"};
-constexpr int kClsFace = -1, kClsSkin = -2; // Track.cls：人脸、裸露皮肤；>= 0 为 NudeClass
+enum ChannelKind { CH_FACE = 0, CH_NUDE = 1, CH_SKIN = 2, CH_TEXT = 3, CH_COUNT = 4 };
+const char *kChannelName[CH_COUNT] = {"人脸", "不雅内容", "裸露皮肤", "敏感文字"};
+constexpr int kClsFace = -1, kClsSkin = -2, kClsText = -3; // Track.cls；>= 0 为 NudeClass
+const int kTextLimits[4] = {640, 800, 960, 1280};
 
 // 不雅类别分组（设置里按组开关）
 enum NudeGroup {
@@ -158,7 +163,7 @@ struct Track {
 	float x, y, w, h;
 	uint64_t last_seen_ns;
 	uint32_t id;
-	int cls; // kClsFace、kClsSkin，或 NudeClass
+	int cls; // kClsFace、kClsSkin、kClsText，或 NudeClass
 };
 
 // 某一帧的检测结果（含保留中的旧框）
@@ -185,6 +190,7 @@ struct Channel {
 	FaceDetector face;
 	NudeDetector nude;
 	SkinDetector skin;
+	TextDetector text;
 
 	std::thread worker;
 	std::mutex job_mutex;
@@ -210,6 +216,19 @@ struct Channel {
 	size_t stat_boxes = 0;
 };
 
+// 一路 GPU → CPU 的画面采集：缩放到 max_size 以内，双缓冲暂存面，下一帧才 map
+struct Capture {
+	uint32_t max_size = 640;
+	gs_texrender_t *tr = nullptr;
+	gs_stagesurf_t *stage[2] = {nullptr, nullptr};
+	uint32_t stage_w[2] = {0, 0}, stage_h[2] = {0, 0};
+	uint64_t stage_seq[2] = {0, 0};
+	uint32_t stage_targets[2] = {0, 0}; // 这份暂存要交给哪些通道（位掩码）
+	bool stage_pending[2] = {false, false};
+	int stage_idx = 0;
+	uint64_t last_capture_ns = 0;
+};
+
 struct FaceMosaic {
 	obs_source_t *context = nullptr;
 
@@ -223,6 +242,10 @@ struct FaceMosaic {
 	int nude_action = 0; // 0 局部打码，1 出现暴露部位时整屏打码
 	std::atomic<float> skin_body{0.4f};
 	std::atomic<float> skin_torso{0.6f};
+	std::mutex text_mutex; // 保护 text_rules（推理线程读、update 写）
+	TextRules text_rules;
+	std::atomic<int> text_limit{800};
+	uint64_t text_interval_ns = 1000000000ULL / 3;
 	std::atomic<uint64_t> hold_ns{500ULL * 1000000ULL};
 	uint64_t detect_interval_ns = 1000000000ULL / 15;
 	int delay_ms = 150;
@@ -231,6 +254,7 @@ struct FaceMosaic {
 	std::string face_model_path;
 	std::string nude_model_path[2];
 	std::string seg_model_path;
+	std::string ocr_det_path, ocr_rec_path;
 
 	Channel ch[CH_COUNT];
 
@@ -241,14 +265,8 @@ struct FaceMosaic {
 	uint32_t ring_w = 0, ring_h = 0;
 	uint64_t frame_seq = 0; // 最新一帧的帧号，从 1 开始
 	bool new_frame = true;
-	gs_texrender_t *small_tr = nullptr;
-	gs_stagesurf_t *stage[2] = {nullptr, nullptr};
-	uint32_t stage_w[2] = {0, 0}, stage_h[2] = {0, 0};
-	uint64_t stage_seq[2] = {0, 0};
-	uint32_t stage_targets[2] = {0, 0}; // 这份暂存要交给哪些通道（位掩码）
-	bool stage_pending[2] = {false, false};
-	int stage_idx = 0;
-	uint64_t last_capture_ns = 0;
+	Capture cap_small; // 人脸、不雅内容、裸露皮肤共用（长边 640 以内）
+	Capture cap_text;  // 敏感文字（长边 1920 以内）
 
 	// 调试：环境变量 FACE_MOSAIC_DUMP=<路径前缀> 时，拿到检测结果约 3 秒后开始，
 	// 每隔 FACE_MOSAIC_DUMP_EVERY 帧（默认 7）导出一组 <前缀>-<n>.png（输出）和
@@ -309,11 +327,16 @@ void load_model(FaceMosaic *f, Channel *c, int model)
 			ok = c->nude.load(f->nude_model_path[model], 640, err);
 		else
 			c->nude.load("", 640, err); // 加载空路径会失败，相当于卸载
-	} else {
+	} else if (c->kind == CH_SKIN) {
 		if (model >= 0)
 			ok = c->skin.load(f->seg_model_path, f->face_model_path, err);
 		else
 			c->skin.load("", "", err);
+	} else {
+		if (model >= 0)
+			ok = c->text.load(f->ocr_det_path, f->ocr_rec_path, err);
+		else
+			c->text.load("", "", err);
 	}
 	c->loaded_model = model;
 	c->model_ok = ok;
@@ -323,7 +346,8 @@ void load_model(FaceMosaic *f, Channel *c, int model)
 		blog(LOG_INFO, "[face-mosaic] %s模型已加载（%s），用时 %.0f ms", kChannelName[c->kind],
 		     c->kind == CH_FACE   ? "YuNet"
 		     : c->kind == CH_NUDE ? kNudeModelFile[model]
-					  : "PP-HumanSeg + YuNet",
+		     : c->kind == CH_SKIN ? "PP-HumanSeg + YuNet"
+					  : "PP-OCRv4",
 		     (os_gettime_ns() - t0) / 1e6);
 	else
 		blog(LOG_ERROR, "[face-mosaic] %s模型加载失败：%s", kChannelName[c->kind], err.c_str());
@@ -343,6 +367,18 @@ std::vector<Track> run_detection(FaceMosaic *f, Channel *c, const std::vector<ui
 		params.torso_threshold = f->skin_torso;
 		for (const SkinBox &b : c->skin.detect(px.data(), w, h, w * 4, params))
 			out.push_back({b.x / w, b.y / h, b.w / w, b.h / h, now, 0, kClsSkin});
+	} else if (c->kind == CH_TEXT) {
+		TextRules rules;
+		{
+			std::lock_guard<std::mutex> lock(f->text_mutex);
+			rules = f->text_rules;
+		}
+		// 注意：识别出的文字可能就是隐私信息，绝不写进日志；日志只记行数和命中规则
+		for (const TextLine &l : c->text.detect(px.data(), w, h, w * 4, f->text_limit)) {
+			std::string reason;
+			if (match_sensitive(l.text, rules, reason))
+				out.push_back({l.x / w, l.y / h, l.w / w, l.h / h, now, 0, kClsText});
+		}
 	} else {
 		uint32_t groups = f->nude_groups;
 		for (const NudeBox &b : c->nude.detect(px.data(), w, h, w * 4, f->nude_threshold)) {
@@ -385,6 +421,8 @@ void worker_loop(FaceMosaic *f, Channel *c)
 		std::vector<Track> dets = run_detection(f, c, pixels, w, h, t0);
 		uint64_t now = os_gettime_ns();
 		uint64_t hold_ns = f->hold_ns;
+		if (c->kind == CH_TEXT)
+			hold_ns = std::max<uint64_t>(hold_ns, 1500ULL * 1000000ULL);
 
 		{
 			std::lock_guard<std::mutex> lock(c->track_mutex);
@@ -495,6 +533,25 @@ void fm_update(void *data, obs_data_t *settings)
 	bool skin_on = obs_data_get_bool(settings, "skin_enabled");
 	f->ch[CH_SKIN].enabled = skin_on;
 	set_want_model(&f->ch[CH_SKIN], skin_on ? 0 : -1);
+
+	TextRules rules;
+	rules.phone = obs_data_get_bool(settings, "text_phone");
+	rules.id_card = obs_data_get_bool(settings, "text_id_card");
+	rules.bank_card = obs_data_get_bool(settings, "text_bank_card");
+	rules.email = obs_data_get_bool(settings, "text_email");
+	rules.url = obs_data_get_bool(settings, "text_url");
+	rules.im = obs_data_get_bool(settings, "text_im");
+	rules.keywords = parse_keywords(obs_data_get_string(settings, "text_keywords"));
+	{
+		std::lock_guard<std::mutex> lock(f->text_mutex);
+		f->text_rules = std::move(rules);
+	}
+	f->text_limit = kTextLimits[std::clamp((int)obs_data_get_int(settings, "text_limit"), 0, 3)];
+	int text_fps = std::max(1, (int)obs_data_get_int(settings, "text_fps"));
+	f->text_interval_ns = 1000000000ULL / text_fps;
+	bool text_on = obs_data_get_bool(settings, "text_enabled");
+	f->ch[CH_TEXT].enabled = text_on;
+	set_want_model(&f->ch[CH_TEXT], text_on ? 0 : -1);
 }
 
 void fm_defaults(obs_data_t *settings)
@@ -520,6 +577,13 @@ void fm_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "skin_enabled", true);
 	obs_data_set_default_int(settings, "skin_body", 40);
 	obs_data_set_default_int(settings, "skin_torso", 60);
+
+	obs_data_set_default_bool(settings, "text_enabled", true);
+	for (const char *k : {"text_phone", "text_id_card", "text_bank_card", "text_email", "text_url", "text_im"})
+		obs_data_set_default_bool(settings, k, true);
+	obs_data_set_default_string(settings, "text_keywords", "");
+	obs_data_set_default_int(settings, "text_limit", 1); // 800
+	obs_data_set_default_int(settings, "text_fps", 3);
 }
 
 obs_properties_t *fm_properties(void *data)
@@ -547,6 +611,25 @@ obs_properties_t *fm_properties(void *data)
 	obs_properties_add_int_slider(skin, "skin_torso", obs_module_text("SkinTorso"), 10, 100, 5);
 	obs_properties_add_text(skin, "skin_info", obs_module_text("SkinInfo"), OBS_TEXT_INFO);
 	obs_properties_add_group(props, "skin_enabled", obs_module_text("SkinEnabled"), OBS_GROUP_CHECKABLE, skin);
+
+	// 敏感文字
+	obs_properties_t *text = obs_properties_create();
+	obs_properties_add_bool(text, "text_phone", obs_module_text("TextPhone"));
+	obs_properties_add_bool(text, "text_id_card", obs_module_text("TextIdCard"));
+	obs_properties_add_bool(text, "text_bank_card", obs_module_text("TextBankCard"));
+	obs_properties_add_bool(text, "text_email", obs_module_text("TextEmail"));
+	obs_properties_add_bool(text, "text_url", obs_module_text("TextUrl"));
+	obs_properties_add_bool(text, "text_im", obs_module_text("TextIm"));
+	obs_properties_add_text(text, "text_keywords", obs_module_text("TextKeywords"), OBS_TEXT_MULTILINE);
+	obs_property_t *limit = obs_properties_add_list(text, "text_limit", obs_module_text("TextLimit"),
+							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(limit, "640", 0);
+	obs_property_list_add_int(limit, "800", 1);
+	obs_property_list_add_int(limit, "960", 2);
+	obs_property_list_add_int(limit, "1280", 3);
+	obs_properties_add_int_slider(text, "text_fps", obs_module_text("TextFps"), 1, 10, 1);
+	obs_properties_add_text(text, "text_info", obs_module_text("TextInfo"), OBS_TEXT_INFO);
+	obs_properties_add_group(props, "text_enabled", obs_module_text("TextEnabled"), OBS_GROUP_CHECKABLE, text);
 
 	// 人脸
 	obs_properties_t *face = obs_properties_create();
@@ -577,6 +660,9 @@ void *fm_create(obs_data_t *settings, obs_source_t *source)
 	f->ch[CH_FACE].kind = CH_FACE;
 	f->ch[CH_NUDE].kind = CH_NUDE;
 	f->ch[CH_SKIN].kind = CH_SKIN;
+	f->ch[CH_TEXT].kind = CH_TEXT;
+	f->cap_small.max_size = kMaxDetectSize;
+	f->cap_text.max_size = kTextCaptureMax;
 
 	auto module_file = [](const char *name) {
 		char *p = obs_module_file(name);
@@ -590,6 +676,8 @@ void *fm_create(obs_data_t *settings, obs_source_t *source)
 	for (int i = 0; i < 2; i++)
 		f->nude_model_path[i] = module_file(kNudeModelFile[i]);
 	f->seg_model_path = module_file("pphumanseg_2023mar.onnx");
+	f->ocr_det_path = module_file("ch_PP-OCRv4_det_infer.onnx");
+	f->ocr_rec_path = module_file("ch_PP-OCRv4_rec_infer.onnx");
 
 	obs_enter_graphics();
 	char *effect_err = nullptr;
@@ -597,7 +685,8 @@ void *fm_create(obs_data_t *settings, obs_source_t *source)
 	if (!f->effect)
 		blog(LOG_ERROR, "[face-mosaic] 着色器编译失败：%s", effect_err ? effect_err : "(无信息)");
 	bfree(effect_err);
-	f->small_tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->cap_small.tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->cap_text.tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	obs_leave_graphics();
 
 	if (const char *dump = getenv("FACE_MOSAIC_DUMP"))
@@ -639,9 +728,11 @@ void fm_destroy(void *data)
 	obs_enter_graphics();
 	gs_effect_destroy(f->effect);
 	destroy_ring(f);
-	gs_texrender_destroy(f->small_tr);
-	gs_stagesurface_destroy(f->stage[0]);
-	gs_stagesurface_destroy(f->stage[1]);
+	for (Capture *cap : {&f->cap_small, &f->cap_text}) {
+		gs_texrender_destroy(cap->tr);
+		gs_stagesurface_destroy(cap->stage[0]);
+		gs_stagesurface_destroy(cap->stage[1]);
+	}
 	gs_texrender_destroy(f->dump_tr);
 	gs_stagesurface_destroy(f->dump_stage_out);
 	gs_stagesurface_destroy(f->dump_stage_raw);
@@ -686,26 +777,26 @@ bool render_target(FaceMosaic *f, gs_texrender_t *tr, uint32_t w, uint32_t h)
 	return true;
 }
 
-// 读回上一帧暂存的小图，交给对应的通道
-void collect_stage(FaceMosaic *f)
+// 读回上一帧暂存的画面，交给对应的通道
+void collect_stage(FaceMosaic *f, Capture &cap)
 {
-	int idx = f->stage_idx ^ 1;
-	if (!f->stage_pending[idx])
+	int idx = cap.stage_idx ^ 1;
+	if (!cap.stage_pending[idx])
 		return;
-	f->stage_pending[idx] = false;
+	cap.stage_pending[idx] = false;
 
 	uint8_t *data = nullptr;
 	uint32_t linesize = 0;
-	if (!gs_stagesurface_map(f->stage[idx], &data, &linesize)) {
+	if (!gs_stagesurface_map(cap.stage[idx], &data, &linesize)) {
 		for (int k = 0; k < CH_COUNT; k++)
-			if (f->stage_targets[idx] & (1u << k))
+			if (cap.stage_targets[idx] & (1u << k))
 				f->ch[k].busy = false;
 		return;
 	}
 
-	int w = (int)f->stage_w[idx], h = (int)f->stage_h[idx];
+	int w = (int)cap.stage_w[idx], h = (int)cap.stage_h[idx];
 	for (int k = 0; k < CH_COUNT; k++) {
-		if (!(f->stage_targets[idx] & (1u << k)))
+		if (!(cap.stage_targets[idx] & (1u << k)))
 			continue;
 		Channel &c = f->ch[k];
 		{
@@ -716,26 +807,26 @@ void collect_stage(FaceMosaic *f)
 				       (size_t)w * 4);
 			c.job_w = w;
 			c.job_h = h;
-			c.job_seq = f->stage_seq[idx];
+			c.job_seq = cap.stage_seq[idx];
 			c.has_job = true;
 		}
 		c.job_cv.notify_one();
 	}
-	gs_stagesurface_unmap(f->stage[idx]);
+	gs_stagesurface_unmap(cap.stage[idx]);
 }
 
 // 把画面缩小后放进暂存面（下一帧再 map）
-void capture_for_detection(FaceMosaic *f, gs_texture_t *tex, uint32_t w, uint32_t h, uint64_t seq,
+void capture_for_detection(Capture &cap, gs_texture_t *tex, uint32_t w, uint32_t h, uint64_t seq,
 			   uint32_t targets)
 {
-	float scale = std::min(1.0f, std::min((float)kMaxDetectSize / w, (float)kMaxDetectSize / h));
+	float scale = std::min(1.0f, std::min((float)cap.max_size / w, (float)cap.max_size / h));
 	uint32_t dw = std::max(1u, (uint32_t)(w * scale + 0.5f));
 	uint32_t dh = std::max(1u, (uint32_t)(h * scale + 0.5f));
-	dw = std::min<uint32_t>(dw, kMaxDetectSize);
-	dh = std::min<uint32_t>(dh, kMaxDetectSize);
+	dw = std::min<uint32_t>(dw, cap.max_size);
+	dh = std::min<uint32_t>(dh, cap.max_size);
 
-	gs_texrender_reset(f->small_tr);
-	if (!gs_texrender_begin(f->small_tr, dw, dh))
+	gs_texrender_reset(cap.tr);
+	if (!gs_texrender_begin(cap.tr, dw, dh))
 		return;
 	gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
 	gs_blend_state_push();
@@ -745,20 +836,20 @@ void capture_for_detection(FaceMosaic *f, gs_texture_t *tex, uint32_t w, uint32_
 	while (gs_effect_loop(def, "Draw"))
 		gs_draw_sprite(tex, 0, w, h);
 	gs_blend_state_pop();
-	gs_texrender_end(f->small_tr);
+	gs_texrender_end(cap.tr);
 
-	int idx = f->stage_idx;
-	if (!f->stage[idx] || f->stage_w[idx] != dw || f->stage_h[idx] != dh) {
-		gs_stagesurface_destroy(f->stage[idx]);
-		f->stage[idx] = gs_stagesurface_create(dw, dh, GS_RGBA);
-		f->stage_w[idx] = dw;
-		f->stage_h[idx] = dh;
+	int idx = cap.stage_idx;
+	if (!cap.stage[idx] || cap.stage_w[idx] != dw || cap.stage_h[idx] != dh) {
+		gs_stagesurface_destroy(cap.stage[idx]);
+		cap.stage[idx] = gs_stagesurface_create(dw, dh, GS_RGBA);
+		cap.stage_w[idx] = dw;
+		cap.stage_h[idx] = dh;
 	}
-	gs_stage_texture(f->stage[idx], gs_texrender_get_texture(f->small_tr));
-	f->stage_seq[idx] = seq;
-	f->stage_targets[idx] = targets;
-	f->stage_pending[idx] = true;
-	f->stage_idx ^= 1;
+	gs_stage_texture(cap.stage[idx], gs_texrender_get_texture(cap.tr));
+	cap.stage_seq[idx] = seq;
+	cap.stage_targets[idx] = targets;
+	cap.stage_pending[idx] = true;
+	cap.stage_idx ^= 1;
 }
 
 // 取输出帧 s 要遮的框：A = 帧号 <= s 的最近结果，B = 帧号 > s 的最近结果
@@ -1013,7 +1104,10 @@ void dump_frames(FaceMosaic *f, gs_texture_t *tex, uint32_t w, uint32_t h, const
 
 	std::string desc;
 	for (const Track &t : boxes) {
-		desc += t.cls == kClsFace ? "FACE" : t.cls == kClsSkin ? "SKIN" : nude_class_name(t.cls);
+		desc += t.cls == kClsFace   ? "FACE"
+			: t.cls == kClsSkin ? "SKIN"
+			: t.cls == kClsText ? "TEXT"
+					    : nude_class_name(t.cls);
 		desc += " ";
 	}
 	blog(LOG_INFO, "[face-mosaic] 调试：暂存第 %d 组，输出帧 %llu（最新帧 %llu），%s框 %zu 个：%s", f->dump_done,
@@ -1057,21 +1151,30 @@ void fm_video_render(void *data, gs_effect_t *)
 		f->frame_seq = seq;
 		f->ring_seq[idx] = seq;
 
-		collect_stage(f);
-		if (now - f->last_capture_ns >= f->detect_interval_ns) {
+		collect_stage(f, f->cap_small);
+		collect_stage(f, f->cap_text);
+		gs_texture_t *latest = gs_texrender_get_texture(f->ring[idx]);
+		if (now - f->cap_small.last_capture_ns >= f->detect_interval_ns) {
 			uint32_t targets = 0;
 			for (int k = 0; k < CH_COUNT; k++) {
 				Channel &c = f->ch[k];
-				if (c.enabled && c.model_ok && !c.busy) {
+				if (k != CH_TEXT && c.enabled && c.model_ok && !c.busy) {
 					c.busy = true;
 					c.last_job_ns = now;
 					targets |= 1u << k;
 				}
 			}
 			if (targets) {
-				f->last_capture_ns = now;
-				capture_for_detection(f, gs_texrender_get_texture(f->ring[idx]), w, h, seq, targets);
+				f->cap_small.last_capture_ns = now;
+				capture_for_detection(f->cap_small, latest, w, h, seq, targets);
 			}
+		}
+		Channel &tc = f->ch[CH_TEXT];
+		if (tc.enabled && tc.model_ok && !tc.busy && now - f->cap_text.last_capture_ns >= f->text_interval_ns) {
+			tc.busy = true;
+			tc.last_job_ns = now;
+			f->cap_text.last_capture_ns = now;
+			capture_for_detection(f->cap_text, latest, w, h, seq, 1u << CH_TEXT);
 		}
 		f->rstat_frames++;
 	}
@@ -1102,15 +1205,17 @@ void fm_video_render(void *data, gs_effect_t *)
 		if (!c.enabled)
 			continue;
 		uint64_t last = c.last_result_ns;
-		bool st = !c.model_ok || last == 0 || now - last > kStallMs * 1000000ULL;
+		uint64_t stall_ns = (c.kind == CH_TEXT ? kTextStallMs : kStallMs) * 1000000ULL;
+		bool st = !c.model_ok || last == 0 || now - last > stall_ns;
 		// 推理线程可能还在处理被丢弃的旧任务，超时后允许重新提交
-		if (st && c.busy && now - c.last_job_ns > kStallMs * 1000000ULL)
+		if (st && c.busy && now - c.last_job_ns > stall_ns)
 			c.busy = false;
 		stalled = stalled || st;
 
 		bool aligned = false;
 		std::vector<Track> part = boxes_for_frame(&c, out_seq, aligned);
-		aligned_all = aligned_all && aligned;
+		if (c.kind != CH_TEXT) // 文字通道每秒只检测几次，不计入对齐统计
+			aligned_all = aligned_all && aligned;
 		for (const Track &t : part)
 			if (t.cls >= 0 && nude_group(t.cls) == G_EXPOSED)
 				exposed = true;

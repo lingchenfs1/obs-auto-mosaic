@@ -8,6 +8,7 @@ third_party/onnxruntime/
 data/*.onnx
 data/seg/
 data/nudenet/
+data/ocr/
 
 # 由 tools/fetch-test-assets.sh 下载或生成（真人照片，不进仓库）
 test/*.jpg

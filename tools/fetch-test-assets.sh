@@ -33,6 +33,12 @@ fetch clothed/desk1.jpg "${T}/f/fb/Frustrated_woman_holds_telephone_receiver_whi
 fetch clothed/desk2.jpg "${T}/3/3a/Woman_stretches_at_home_office_desk_while_working_on_laptop.jpg/1280px-Woman_stretches_at_home_office_desk_while_working_on_laptop.jpg"
 fetch clothed/robbie.jpg "${T}/c/cc/Robbie_Pierce.jpg/1280px-Robbie_Pierce.jpg"
 
+# 敏感文字测试画面（需要 Pillow；里面的隐私信息都是示例值）
+if [ ! -s text-sample.png ]; then
+	echo "生成 text-sample.png"
+	python3 "${ROOT}/tools/make-text-test.py" text-sample.png
+fi
+
 # 延迟对齐测试视频（需要 Pillow 和 ffmpeg）
 if [ ! -s moving-faces.mp4 ]; then
 	echo "生成 moving-faces.mp4"

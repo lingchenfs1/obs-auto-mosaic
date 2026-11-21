@@ -2,7 +2,7 @@
 # 下载构建所需的依赖和模型（都不放进仓库）：
 #   third_party/obs-studio   libobs 头文件（版本跟已安装的 OBS 一致）
 #   third_party/onnxruntime  ONNX Runtime 预编译包（NuGet 官方包里的 macOS arm64 动态库和头文件）
-#   data/                    YuNet、PP-HumanSeg（opencv_zoo）、NudeNet v3（320n / 640m）
+#   data/                    YuNet、PP-HumanSeg（opencv_zoo）、PP-OCRv4（RapidOCR 导出的 ONNX）、NudeNet v3（320n / 640m）
 # 用法：tools/fetch-deps.sh [OBS 版本，默认 33.0.1] [onnxruntime 版本，默认 1.32.0]
 set -euo pipefail
 
@@ -45,6 +45,9 @@ fetch data/face_detection_yunet_2023mar.onnx \
 	https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
 fetch data/seg/pphumanseg_2023mar.onnx \
 	https://github.com/opencv/opencv_zoo/raw/main/models/human_segmentation_pphumanseg/human_segmentation_pphumanseg_2023mar.onnx
+for m in ch_PP-OCRv4_det_infer.onnx ch_PP-OCRv4_rec_infer.onnx; do
+	fetch "data/ocr/${m}" "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/${m}"
+done
 
 # NudeNet 的 release 文件直链会跳转到 GitHub 登录页，需要用已登录的 gh 下载
 mkdir -p data/nudenet
@@ -62,7 +65,7 @@ for m in 320n.onnx 640m.onnx; do
 done
 
 # 下载到的模型如果是网页（被重定向到登录页等），文件开头会是 HTML
-for f in data/face_detection_yunet_2023mar.onnx data/seg/pphumanseg_2023mar.onnx data/nudenet/*.onnx; do
+for f in data/face_detection_yunet_2023mar.onnx data/seg/pphumanseg_2023mar.onnx data/ocr/*.onnx data/nudenet/*.onnx; do
 	if grep -qi "<html\|<!doctype" < <(head -c 64 "${f}"); then
 		echo "${f} 下载到的是网页而不是模型，请删掉后重试" >&2
 		exit 1

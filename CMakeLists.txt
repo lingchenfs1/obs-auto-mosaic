@@ -14,7 +14,8 @@ set(ORT_DIR "${CMAKE_SOURCE_DIR}/third_party/onnxruntime" CACHE PATH "onnxruntim
 set(ORT_DYLIB "${ORT_DIR}/lib/libonnxruntime.dylib")
 
 # ---- 检测器（插件和测试工具共用）----
-add_library(face_detector STATIC src/face-detector.cpp src/nude-detector.cpp src/skin-detector.cpp)
+add_library(face_detector STATIC src/face-detector.cpp src/nude-detector.cpp src/skin-detector.cpp
+  src/text-detector.cpp)
 target_include_directories(face_detector PUBLIC src "${ORT_DIR}/include")
 target_link_libraries(face_detector PUBLIC "${ORT_DYLIB}")
 set_target_properties(face_detector PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -37,6 +38,11 @@ add_executable(skin-test tools/skin-test.cpp tools/stb-impl-test.c)
 target_include_directories(skin-test PRIVATE third_party/stb)
 target_link_libraries(skin-test PRIVATE face_detector)
 set_target_properties(skin-test PROPERTIES BUILD_RPATH "${ORT_DIR}/lib")
+
+add_executable(text-test tools/text-test.cpp tools/stb-impl-test.c)
+target_include_directories(text-test PRIVATE third_party/stb)
+target_link_libraries(text-test PRIVATE face_detector)
+set_target_properties(text-test PROPERTIES BUILD_RPATH "${ORT_DIR}/lib")
 
 # ---- OBS 插件 ----
 add_library(obs-face-mosaic MODULE src/plugin-main.cpp src/face-mosaic-filter.cpp src/stb-impl.c)
@@ -61,6 +67,7 @@ add_custom_command(TARGET obs-face-mosaic POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory "${BUNDLE_DIR}/Contents/Resources/locale" "${BUNDLE_DIR}/Contents/Frameworks"
   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/data/face_detection_yunet_2023mar.onnx" "${BUNDLE_DIR}/Contents/Resources/"
   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/data/seg/pphumanseg_2023mar.onnx" "${BUNDLE_DIR}/Contents/Resources/"
+  COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/data/ocr/ch_PP-OCRv4_det_infer.onnx" "${CMAKE_SOURCE_DIR}/data/ocr/ch_PP-OCRv4_rec_infer.onnx" "${BUNDLE_DIR}/Contents/Resources/"
   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/data/nudenet/320n.onnx" "${CMAKE_SOURCE_DIR}/data/nudenet/640m.onnx" "${BUNDLE_DIR}/Contents/Resources/"
   COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/data/locale" "${BUNDLE_DIR}/Contents/Resources/locale"
   COMMAND ${CMAKE_COMMAND} -E copy "${ORT_DYLIB}" "${BUNDLE_DIR}/Contents/Frameworks/libonnxruntime.1.dylib"
