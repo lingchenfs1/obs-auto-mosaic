@@ -2,7 +2,7 @@
 
 #include "face-detector.hpp"
 
-#include "ort-options.hpp"
+#include "ort-runtime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -69,17 +69,18 @@ bool SkinDetector::loaded() const
 	return impl_->seg != nullptr && impl_->face.loaded();
 }
 
-bool SkinDetector::load(const std::string &seg_model, const std::string &face_model, std::string &error)
+bool SkinDetector::load(const std::string &seg_model, const std::string &face_model, std::string &error,
+			int accel)
 {
 	try {
-		Ort::SessionOptions opts = make_session_options(1);
-		impl_->seg = std::make_unique<Ort::Session>(ort_env(), seg_model.c_str(), opts);
+		Ort::SessionOptions opts = make_session_options(1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
+		impl_->seg = std::make_unique<Ort::Session>(ort_env(), ort_path(seg_model).c_str(), opts);
 	} catch (const std::exception &e) {
 		error = e.what();
 		impl_->seg.reset();
 		return false;
 	}
-	if (!impl_->face.load(face_model, error)) {
+	if (!impl_->face.load(face_model, error, accel)) {
 		impl_->seg.reset();
 		return false;
 	}

@@ -1,6 +1,6 @@
 #include "text-detector.hpp"
 
-#include "ort-options.hpp"
+#include "ort-runtime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -180,12 +180,12 @@ bool TextDetector::loaded() const
 	return impl_->det && impl_->rec && impl_->chars.size() > 2;
 }
 
-bool TextDetector::load(const std::string &det_model, const std::string &rec_model, std::string &error)
+bool TextDetector::load(const std::string &det_model, const std::string &rec_model, std::string &error, int accel)
 {
 	try {
-		Ort::SessionOptions opts = make_session_options(1);
-		impl_->det = std::make_unique<Ort::Session>(ort_env(), det_model.c_str(), opts);
-		impl_->rec = std::make_unique<Ort::Session>(ort_env(), rec_model.c_str(), opts);
+		Ort::SessionOptions opts = make_session_options(1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
+		impl_->det = std::make_unique<Ort::Session>(ort_env(), ort_path(det_model).c_str(), opts);
+		impl_->rec = std::make_unique<Ort::Session>(ort_env(), ort_path(rec_model).c_str(), opts);
 
 		// 字典在识别模型的元数据里，每行一个字
 		Ort::AllocatorWithDefaultOptions alloc;

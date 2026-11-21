@@ -1,6 +1,7 @@
 // 离线测试敏感文字识别：OCR 每一行，按规则和关键词判断，命中的行标红、其余标绿，写出 PNG。
 // 用法：text-test <检测模型> <识别模型> <输入图片> <输出.png> [关键词列表，逗号分隔] [检测分辨率上限]
 #include "text-detector.hpp"
+#include "ort-runtime.hpp"
 
 #include "stb_image.h"
 #include "stb_image_write.h"
@@ -12,6 +13,8 @@
 
 int main(int argc, char **argv)
 {
+	std::string ort_info;
+	ort_runtime_init("", ort_info); // 测试工具只在 macOS 构建，直接用链接进来的运行库
 	if (argc < 5) {
 		fprintf(stderr, "用法：%s <检测模型> <识别模型> <输入图片> <输出.png> [关键词] [检测分辨率上限]\n", argv[0]);
 		return 2;

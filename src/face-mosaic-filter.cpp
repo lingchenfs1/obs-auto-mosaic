@@ -25,6 +25,7 @@
 #include "nude-detector.hpp"
 #include "skin-detector.hpp"
 #include "text-detector.hpp"
+#include "ort-runtime.hpp"
 
 #include "stb_image_write.h"
 
@@ -33,6 +34,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -314,41 +316,55 @@ int match_track(const Track &t, const std::vector<Track> &old, const std::vector
 	return best_i;
 }
 
-void load_model(FaceMosaic *f, Channel *c, int model)
+// want 编码：模型编号 * 4 + 推理设备（0 自动 GPU 优先，1 仅 CPU）；-1 表示卸载
+int want_code(int model, int accel)
 {
+	return model < 0 ? -1 : model * 4 + accel;
+}
+
+void load_model(FaceMosaic *f, Channel *c, int want)
+{
+	const int model = want < 0 ? -1 : want / 4;
+	const int accel = want < 0 ? 1 : want % 4;
 	bool ok = false;
 	std::string err;
 	uint64_t t0 = os_gettime_ns();
-	if (c->kind == CH_FACE) {
+	if (!ort_runtime_ready()) {
+		err = "ONNX Runtime 没有初始化成功（见插件加载时的日志）";
+	} else if (c->kind == CH_FACE) {
 		if (model >= 0)
-			ok = c->face.load(f->face_model_path, err);
+			ok = c->face.load(f->face_model_path, err, accel);
 	} else if (c->kind == CH_NUDE) {
 		if (model >= 0 && model < 2)
-			ok = c->nude.load(f->nude_model_path[model], 640, err);
+			ok = c->nude.load(f->nude_model_path[model], 640, err, accel);
 		else
 			c->nude.load("", 640, err); // 加载空路径会失败，相当于卸载
 	} else if (c->kind == CH_SKIN) {
 		if (model >= 0)
-			ok = c->skin.load(f->seg_model_path, f->face_model_path, err);
+			ok = c->skin.load(f->seg_model_path, f->face_model_path, err, accel);
 		else
 			c->skin.load("", "", err);
 	} else {
 		if (model >= 0)
-			ok = c->text.load(f->ocr_det_path, f->ocr_rec_path, err);
+			ok = c->text.load(f->ocr_det_path, f->ocr_rec_path, err, accel);
 		else
 			c->text.load("", "", err);
 	}
-	c->loaded_model = model;
+	c->loaded_model = want;
 	c->model_ok = ok;
 	if (model < 0)
 		return;
+	const std::string &provider = c->kind == CH_FACE   ? c->face.provider()
+				      : c->kind == CH_NUDE ? c->nude.provider()
+				      : c->kind == CH_SKIN ? c->skin.provider()
+							   : c->text.provider();
 	if (ok)
-		blog(LOG_INFO, "[face-mosaic] %s模型已加载（%s），用时 %.0f ms", kChannelName[c->kind],
+		blog(LOG_INFO, "[face-mosaic] %s模型已加载（%s，%s），用时 %.0f ms", kChannelName[c->kind],
 		     c->kind == CH_FACE   ? "YuNet"
 		     : c->kind == CH_NUDE ? kNudeModelFile[model]
 		     : c->kind == CH_SKIN ? "PP-HumanSeg + YuNet"
 					  : "PP-OCRv4",
-		     (os_gettime_ns() - t0) / 1e6);
+		     provider.c_str(), (os_gettime_ns() - t0) / 1e6);
 	else
 		blog(LOG_ERROR, "[face-mosaic] %s模型加载失败：%s", kChannelName[c->kind], err.c_str());
 }
@@ -510,11 +526,12 @@ void fm_update(void *data, obs_data_t *settings)
 	f->detect_interval_ns = 1000000000ULL / fps;
 	f->delay_ms = std::max(0, (int)obs_data_get_int(settings, "delay_ms"));
 	f->fail_safe = obs_data_get_bool(settings, "fail_safe");
+	const int accel = std::clamp((int)obs_data_get_int(settings, "accel"), 0, 1);
 
 	f->face_threshold = (float)obs_data_get_double(settings, "threshold");
 	bool face_on = obs_data_get_bool(settings, "face_enabled");
 	f->ch[CH_FACE].enabled = face_on;
-	set_want_model(&f->ch[CH_FACE], face_on ? 0 : -1);
+	set_want_model(&f->ch[CH_FACE], want_code(face_on ? 0 : -1, accel));
 
 	f->nude_threshold = (float)obs_data_get_double(settings, "nude_threshold");
 	uint32_t groups = 0;
@@ -526,13 +543,13 @@ void fm_update(void *data, obs_data_t *settings)
 	bool nude_on = obs_data_get_bool(settings, "nude_enabled");
 	int nude_model = std::clamp((int)obs_data_get_int(settings, "nude_model"), 0, 1);
 	f->ch[CH_NUDE].enabled = nude_on;
-	set_want_model(&f->ch[CH_NUDE], nude_on ? nude_model : -1);
+	set_want_model(&f->ch[CH_NUDE], want_code(nude_on ? nude_model : -1, accel));
 
 	f->skin_body = (float)obs_data_get_int(settings, "skin_body") / 100.0f;
 	f->skin_torso = (float)obs_data_get_int(settings, "skin_torso") / 100.0f;
 	bool skin_on = obs_data_get_bool(settings, "skin_enabled");
 	f->ch[CH_SKIN].enabled = skin_on;
-	set_want_model(&f->ch[CH_SKIN], skin_on ? 0 : -1);
+	set_want_model(&f->ch[CH_SKIN], want_code(skin_on ? 0 : -1, accel));
 
 	TextRules rules;
 	rules.phone = obs_data_get_bool(settings, "text_phone");
@@ -551,7 +568,7 @@ void fm_update(void *data, obs_data_t *settings)
 	f->text_interval_ns = 1000000000ULL / text_fps;
 	bool text_on = obs_data_get_bool(settings, "text_enabled");
 	f->ch[CH_TEXT].enabled = text_on;
-	set_want_model(&f->ch[CH_TEXT], text_on ? 0 : -1);
+	set_want_model(&f->ch[CH_TEXT], want_code(text_on ? 0 : -1, accel));
 }
 
 void fm_defaults(obs_data_t *settings)
@@ -563,6 +580,7 @@ void fm_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "detect_fps", 15);
 	obs_data_set_default_int(settings, "delay_ms", 150);
 	obs_data_set_default_bool(settings, "fail_safe", true);
+	obs_data_set_default_int(settings, "accel", 0);
 
 	obs_data_set_default_bool(settings, "face_enabled", true);
 	obs_data_set_default_double(settings, "threshold", 0.6);
@@ -648,6 +666,13 @@ obs_properties_t *fm_properties(void *data)
 	obs_properties_add_int_slider(props, "delay_ms", obs_module_text("DelayMs"), 0, 500, 10);
 	obs_properties_add_text(props, "delay_info", obs_module_text("DelayInfo"), OBS_TEXT_INFO);
 	obs_properties_add_bool(props, "fail_safe", obs_module_text("FailSafe"));
+	obs_property_t *accel = obs_properties_add_list(props, "accel", obs_module_text("Accel"), OBS_COMBO_TYPE_LIST,
+							OBS_COMBO_FORMAT_INT);
+	std::string gpu = obs_module_text("Accel.Auto");
+	if (*ort_gpu_provider())
+		gpu += std::string("（") + ort_gpu_provider() + "）";
+	obs_property_list_add_int(accel, gpu.c_str(), 0);
+	obs_property_list_add_int(accel, obs_module_text("Accel.Cpu"), 1);
 
 	UNUSED_PARAMETER(data);
 	return props;

@@ -43,8 +43,11 @@ public:
 	TextDetector();
 	~TextDetector();
 
-	bool load(const std::string &det_model, const std::string &rec_model, std::string &error);
+	// accel：0 = 有 GPU 方案就用，1 = 只用 CPU
+	bool load(const std::string &det_model, const std::string &rec_model, std::string &error, int accel = 1);
 	bool loaded() const;
+	// 实际使用的推理方案（"CPU"、"CoreML"、"CUDA"、"DirectML"）
+	const std::string &provider() const { return provider_; }
 
 	// rgba：RGBA8 像素，任意尺寸（建议原分辨率或 1920 以内，小字才认得出）
 	std::vector<TextLine> detect(const uint8_t *rgba, int w, int h, int stride, int det_limit = 960);
@@ -52,4 +55,5 @@ public:
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl_;
+	std::string provider_ = "CPU";
 };

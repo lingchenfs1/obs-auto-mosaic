@@ -1,15 +1,53 @@
 #!/usr/bin/env bash
 # 下载构建所需的依赖和模型（都不放进仓库）：
-#   third_party/obs-studio   libobs 头文件（版本跟已安装的 OBS 一致）
-#   third_party/onnxruntime  ONNX Runtime 预编译包（NuGet 官方包里的 macOS arm64 动态库和头文件）
+#   third_party/obs-studio   libobs 头文件（版本跟目标 OBS 一致）
 #   data/                    YuNet、PP-HumanSeg（opencv_zoo）、PP-OCRv4（RapidOCR 导出的 ONNX）、NudeNet v3（320n / 640m）
-# 用法：tools/fetch-deps.sh [OBS 版本，默认 33.0.1] [onnxruntime 版本，默认 1.32.0]
+# macOS：
+#   third_party/onnxruntime  ONNX Runtime（NuGet 官方包里的 macOS arm64 动态库和头文件）
+# Windows（Git Bash，GitHub Actions 用）：
+#   third_party/obs-win/obs.dll      OBS 发布包里的 obs.dll（之后用 tools/make-import-lib.py 生成 obs.lib）
+#   third_party/onnxruntime/include  ONNX Runtime 头文件（取 DirectML 包的 1.24，新版运行库兼容旧版接口）
+#   third_party/ort-win/dml          onnxruntime.dll（DirectML 版）+ DirectML.dll
+#   third_party/ort-win/cuda         onnxruntime*.dll（CUDA 版，可选，体积大）
+# 用法：tools/fetch-deps.sh
+# 版本可用环境变量覆盖：OBS_VERSION、ORT_VERSION（macOS）、ORT_DML_VERSION、DIRECTML_VERSION、ORT_CUDA_VERSION、
+# 设 SKIP_CUDA=1 不下载 CUDA 版运行库。
 set -euo pipefail
 
-OBS_VERSION="${1:-33.0.1}"
-ORT_VERSION="${2:-1.32.0}"
+OBS_VERSION="${OBS_VERSION:-33.0.1}"
+ORT_VERSION="${ORT_VERSION:-1.32.0}"
+ORT_DML_VERSION="${ORT_DML_VERSION:-1.24.4}"
+DIRECTML_VERSION="${DIRECTML_VERSION:-1.15.4}"
+ORT_CUDA_VERSION="${ORT_CUDA_VERSION:-1.32.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
+
+PY="$(command -v python3 || command -v python)"
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*) OS=windows ;;
+Darwin) OS=macos ;;
+*) OS=other ;;
+esac
+
+# 从 zip / nupkg 里解出若干成员：unzip_members <压缩包> <目标目录> <成员前缀>...
+# 只取以给定前缀开头的文件，按原路径放到目标目录下（用 Python，Git Bash 不一定有 unzip）
+unzip_members() {
+	"${PY}" - "$@" <<'EOF'
+import os, sys, zipfile
+src, dst, prefixes = sys.argv[1], sys.argv[2], sys.argv[3:]
+with zipfile.ZipFile(src) as z:
+    for n in z.namelist():
+        if not n.endswith("/") and any(n.startswith(p) for p in prefixes):
+            out = os.path.join(dst, *n.split("/"))
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with z.open(n) as f, open(out, "wb") as o:
+                o.write(f.read())
+EOF
+}
+
+nuget() { # <包名（小写）> <版本> <保存路径>
+	curl -fsSL -o "$3" "https://api.nuget.org/v3-flatcontainer/$1/$2/$1.$2.nupkg"
+}
 
 # ---- libobs 头文件 ----
 if [ ! -d third_party/obs-studio/libobs ]; then
@@ -19,17 +57,54 @@ if [ ! -d third_party/obs-studio/libobs ]; then
 	git -C third_party/obs-studio sparse-checkout set libobs
 fi
 
-# ---- ONNX Runtime ----
-if [ ! -f third_party/onnxruntime/lib/libonnxruntime.dylib ]; then
-	echo "下载 onnxruntime ${ORT_VERSION}（NuGet）"
+if [ "${OS}" = macos ]; then
+	# ---- ONNX Runtime（macOS）----
+	if [ ! -f third_party/onnxruntime/lib/libonnxruntime.dylib ]; then
+		echo "下载 onnxruntime ${ORT_VERSION}（NuGet）"
+		tmp="$(mktemp -d)"
+		nuget microsoft.ml.onnxruntime "${ORT_VERSION}" "${tmp}/ort.nupkg"
+		unzip_members "${tmp}/ort.nupkg" "${tmp}/x" build/native/include/ runtimes/osx-arm64/native/
+		mkdir -p third_party/onnxruntime/lib
+		rm -rf third_party/onnxruntime/include
+		mv "${tmp}/x/build/native/include" third_party/onnxruntime/include
+		mv "${tmp}/x/runtimes/osx-arm64/native/libonnxruntime.dylib" third_party/onnxruntime/lib/
+		rm -rf "${tmp}"
+	fi
+elif [ "${OS}" = windows ]; then
 	tmp="$(mktemp -d)"
-	curl -fsSL -o "${tmp}/ort.nupkg" \
-		"https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ORT_VERSION}/microsoft.ml.onnxruntime.${ORT_VERSION}.nupkg"
-	unzip -q "${tmp}/ort.nupkg" 'build/native/include/*' 'runtimes/osx-arm64/native/*' -d "${tmp}/x"
-	mkdir -p third_party/onnxruntime/lib
-	rm -rf third_party/onnxruntime/include
-	mv "${tmp}/x/build/native/include" third_party/onnxruntime/include
-	mv "${tmp}/x/runtimes/osx-arm64/native/libonnxruntime.dylib" third_party/onnxruntime/lib/
+	# ---- OBS 发布包里的 obs.dll ----
+	if [ ! -f third_party/obs-win/obs.dll ]; then
+		echo "下载 OBS ${OBS_VERSION} Windows 发布包（取 obs.dll）"
+		curl -fsSL -o "${tmp}/obs.zip" \
+			"https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSION}/OBS-Studio-${OBS_VERSION}-Windows-x64.zip"
+		unzip_members "${tmp}/obs.zip" "${tmp}/obs" bin/64bit/obs.dll
+		mkdir -p third_party/obs-win
+		mv "${tmp}/obs/bin/64bit/obs.dll" third_party/obs-win/
+	fi
+	# ---- ONNX Runtime DirectML 版 + 头文件 ----
+	if [ ! -f third_party/ort-win/dml/onnxruntime.dll ]; then
+		echo "下载 onnxruntime ${ORT_DML_VERSION}（DirectML 版）和 DirectML ${DIRECTML_VERSION}"
+		nuget microsoft.ml.onnxruntime.directml "${ORT_DML_VERSION}" "${tmp}/dml.nupkg"
+		unzip_members "${tmp}/dml.nupkg" "${tmp}/dml" build/native/include/ runtimes/win-x64/native/
+		nuget microsoft.ai.directml "${DIRECTML_VERSION}" "${tmp}/directml.nupkg"
+		unzip_members "${tmp}/directml.nupkg" "${tmp}/directml" bin/x64-win/DirectML.dll
+		rm -rf third_party/onnxruntime/include third_party/ort-win/dml
+		mkdir -p third_party/onnxruntime third_party/ort-win/dml
+		mv "${tmp}/dml/build/native/include" third_party/onnxruntime/include
+		cp "${tmp}/dml/runtimes/win-x64/native/onnxruntime.dll" third_party/ort-win/dml/
+		cp "${tmp}/directml/bin/x64-win/DirectML.dll" third_party/ort-win/dml/
+	fi
+	# ---- ONNX Runtime CUDA 版（可选）----
+	if [ "${SKIP_CUDA:-0}" != 1 ] && [ ! -f third_party/ort-win/cuda/onnxruntime.dll ]; then
+		echo "下载 onnxruntime ${ORT_CUDA_VERSION}（CUDA 版）"
+		nuget microsoft.ml.onnxruntime.gpu.windows "${ORT_CUDA_VERSION}" "${tmp}/cuda.nupkg"
+		unzip_members "${tmp}/cuda.nupkg" "${tmp}/cuda" runtimes/win-x64/native/
+		mkdir -p third_party/ort-win/cuda
+		# 只要 onnxruntime 本体、共享层和 CUDA 方案；TensorRT 方案用不上，体积大，不要
+		for f in onnxruntime.dll onnxruntime_providers_shared.dll onnxruntime_providers_cuda.dll; do
+			cp "${tmp}/cuda/runtimes/win-x64/native/${f}" third_party/ort-win/cuda/
+		done
+	fi
 	rm -rf "${tmp}"
 fi
 
@@ -49,7 +124,7 @@ for m in ch_PP-OCRv4_det_infer.onnx ch_PP-OCRv4_rec_infer.onnx; do
 	fetch "data/ocr/${m}" "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/${m}"
 done
 
-# NudeNet 的 release 文件直链会跳转到 GitHub 登录页，需要用已登录的 gh 下载
+# NudeNet 的 release 文件直链会跳转到 GitHub 登录页，需要用已登录的 gh 下载（GitHub Actions 里用 GH_TOKEN）
 mkdir -p data/nudenet
 for m in 320n.onnx 640m.onnx; do
 	if [ ! -s "data/nudenet/${m}" ]; then

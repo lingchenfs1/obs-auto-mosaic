@@ -1,6 +1,7 @@
 // 离线测试：读一张图片，缩放到 640 以内跑 YuNet，在人脸处打马赛克后写出 PNG。
 // 用法：detect-test <模型.onnx> <输入图片> <输出.png> [阈值]
 #include "face-detector.hpp"
+#include "ort-runtime.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -58,6 +59,8 @@ static void pixelate(uint8_t *img, int w, int h, int x0, int y0, int x1, int y1,
 
 int main(int argc, char **argv)
 {
+	std::string ort_info;
+	ort_runtime_init("", ort_info); // 测试工具只在 macOS 构建，直接用链接进来的运行库
 	if (argc < 4) {
 		fprintf(stderr, "用法：%s <模型.onnx> <输入图片> <输出.png> [阈值]\n", argv[0]);
 		return 2;

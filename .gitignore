@@ -19,3 +19,5 @@ test/clothed/*.jpg
 test/*.json
 # 离线测试工具的输出
 *.png
+third_party/obs-win/
+third_party/ort-win/

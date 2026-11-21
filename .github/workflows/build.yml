@@ -1,0 +1,113 @@
+name: 构建
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # 推标签时创建 Release
+
+env:
+  OBS_VERSION: "33.0.1"
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: 下载依赖和模型
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/fetch-deps.sh
+
+      - name: 生成 obs.lib
+        shell: pwsh
+        run: python tools/make-import-lib.py third_party/obs-win/obs.dll third_party/obs-win/obs.lib
+
+      - name: CUDA 版运行库依赖的 DLL（用来确认需要的 CUDA / cuDNN 版本）
+        shell: pwsh
+        run: |
+          $deps = dumpbin /nologo /dependents third_party/ort-win/cuda/onnxruntime_providers_cuda.dll |
+            Select-String -Pattern '^\s+((cu|nv)\S+\.dll)' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+          $deps
+          "CUDA_DEPS=$($deps -join ', ')" >> $env:GITHUB_ENV
+
+      - name: 构建
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          Copy-Item packaging/windows/README-Windows.txt build/package/
+          Copy-Item packaging/windows/install.ps1 build/package/
+          Compress-Archive -Path build/package/* -DestinationPath obs-auto-mosaic-windows-x64.zip
+          (Get-Content -Raw -Encoding utf8 packaging/windows/README-CUDA.txt) -replace '__CUDA_DEPS__', $env:CUDA_DEPS |
+            Set-Content -NoNewline -Encoding utf8BOM build/package-cuda/README-CUDA.txt
+          Compress-Archive -Path build/package-cuda/* -DestinationPath obs-auto-mosaic-windows-cuda-addon.zip
+          Get-ChildItem *.zip | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            obs-auto-mosaic-windows-x64.zip
+            obs-auto-mosaic-windows-cuda-addon.zip
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建工具
+        run: brew install simde ninja
+
+      - name: 下载依赖和模型
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/fetch-deps.sh
+
+      - name: 下载 OBS（链接 libobs 用）
+        run: |
+          curl -fsSL -o obs.dmg "https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSION}/OBS-Studio-${OBS_VERSION}-macOS-Apple.dmg"
+          VOL=$(hdiutil attach -nobrowse -readonly obs.dmg | tail -1 | cut -f3)
+          echo "OBS_APP=${VOL}/OBS.app" >> "$GITHUB_ENV"
+
+      - name: 构建
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOBS_APP="${OBS_APP}"
+          cmake --build build
+
+      - name: 打包
+        run: |
+          ditto -c -k --keepParent build/obs-face-mosaic.plugin obs-auto-mosaic-macos-arm64.zip
+          ls -l *.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: obs-auto-mosaic-macos-arm64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: "*.zip"

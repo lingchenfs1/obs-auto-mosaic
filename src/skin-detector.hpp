@@ -33,8 +33,11 @@ public:
 	SkinDetector();
 	~SkinDetector();
 
-	bool load(const std::string &seg_model, const std::string &face_model, std::string &error);
+	// accel：0 = 有 GPU 方案就用，1 = 只用 CPU
+	bool load(const std::string &seg_model, const std::string &face_model, std::string &error, int accel = 1);
 	bool loaded() const;
+	// 实际使用的推理方案（"CPU"、"CoreML"、"CUDA"、"DirectML"）
+	const std::string &provider() const { return provider_; }
 
 	// rgba：RGBA8 像素，w、h <= 640
 	std::vector<SkinBox> detect(const uint8_t *rgba, int w, int h, int stride, const SkinParams &params,
@@ -43,4 +46,5 @@ public:
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl_;
+	std::string provider_ = "CPU";
 };

@@ -36,6 +36,7 @@ open -n -a /Applications/OBS.app \
 	--env "FACE_MOSAIC_DUMP_EVERY=${DUMP_EVERY}" \
 	--env "FACE_MOSAIC_ORT_THREADS=${FACE_MOSAIC_ORT_THREADS:-}" \
 	--env "FACE_MOSAIC_ORT_SPIN=${FACE_MOSAIC_ORT_SPIN:-}" \
+	--env "FACE_MOSAIC_COREML_UNITS=${FACE_MOSAIC_COREML_UNITS:-}" \
 	--args --collection obs-ai-test --disable-shutdown-check --disable-updater
 
 pid=""

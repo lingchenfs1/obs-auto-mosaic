@@ -1,6 +1,6 @@
 #include "face-detector.hpp"
 
-#include "ort-options.hpp"
+#include "ort-runtime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -44,11 +44,11 @@ bool FaceDetector::loaded() const
 	return impl_->session != nullptr;
 }
 
-bool FaceDetector::load(const std::string &model_path, std::string &error)
+bool FaceDetector::load(const std::string &model_path, std::string &error, int accel)
 {
 	try {
-		Ort::SessionOptions opts = make_session_options(1);
-		impl_->session = std::make_unique<Ort::Session>(ort_env(), model_path.c_str(), opts);
+		Ort::SessionOptions opts = make_session_options(1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
+		impl_->session = std::make_unique<Ort::Session>(ort_env(), ort_path(model_path).c_str(), opts);
 		impl_->input.assign(3 * kInputSize * kInputSize, 0.0f);
 		return true;
 	} catch (const std::exception &e) {

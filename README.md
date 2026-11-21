@@ -1,6 +1,6 @@
 # obs-auto-mosaic：OBS 自动马赛克滤镜
 
-给 OBS 里任意视频源加一个「自动马赛克」滤镜：检测到不雅部位、大面积裸露皮肤、敏感文字或人脸，就自动打码（马赛克，或 100% 不透明的黑色色块）。目前只在 macOS（Apple Silicon）+ OBS 33.0.1 上构建和测试过。
+给 OBS 里任意视频源加一个「自动马赛克」滤镜：检测到不雅部位、大面积裸露皮肤、敏感文字或人脸，就自动打码（马赛克，或 100% 不透明的黑色色块）。支持 macOS（Apple Silicon）和 Windows 10/11 x64，OBS 33.x；macOS 版在 OBS 33.0.1 上实测，Windows 版由 GitHub Actions 构建、**尚未在 Windows 上实测**。可通过 OBS 虚拟摄像头配合抖音直播伴侣使用。
 
 四个检测通道，各自在独立线程里推理，可分别开关：
 
@@ -11,7 +11,7 @@
 | 敏感文字 | [PP-OCRv4](https://github.com/PaddlePaddle/PaddleOCR)（[RapidOCR](https://github.com/RapidAI/RapidOCR) 导出的 ONNX） | 手机号、身份证号、银行卡号、邮箱、网址、微信 / QQ 号，以及自定义关键词 |
 | 人脸 | [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) | 给路人等人脸打码 |
 
-推理用 [ONNX Runtime](https://onnxruntime.ai/)（CPU），打码用 GPU 着色器。
+推理用 [ONNX Runtime](https://onnxruntime.ai/)，可用 GPU 加速（macOS：CoreML；Windows：CUDA 或 DirectML），打码用 GPU 着色器。
 
 ## 主要特性
 
@@ -19,6 +19,41 @@
 - **兜底**：任一启用的通道超过 1 秒没有新结果（模型加载中、推理卡住、源刚显示），整个画面打码。
 - **可选整屏打码**：出现暴露的胸部、生殖器、臀部时，可以选择直接给整个画面打码。
 - **遮挡方式**：「马赛克」或「黑色色块（100% 不透明）」。黑色色块直接覆盖、不与原画面混合，兜底时的整屏遮挡也会变成全黑；在 OBS 里逐像素验证过，被遮挡的像素全部是 (0,0,0,255)。
+
+## GPU 加速
+
+滤镜设置「推理设备」：「自动（有 GPU 就用 GPU）」或「仅 CPU」，默认自动。实际用的方案写在 OBS 日志的 `[face-mosaic] … 模型已加载（…，CoreML / CUDA / DirectML / CPU）` 里。
+
+| 平台 | 方案 | 说明 |
+|---|---|---|
+| macOS | CoreML（CPU + GPU） | 首次加载每个模型要编译 0.5~2 秒，期间兜底整屏打码 |
+| Windows | CUDA（可选扩展包） | 英伟达显卡专用，需要装好对应版本的 CUDA 和 cuDNN；加不上会自动换 DirectML |
+| Windows | DirectML（默认） | 任何支持 DirectX 12 的显卡（英伟达 / AMD / Intel），不用额外安装 |
+
+Windows 上插件按完整路径加载自带的 `onnxruntime.dll`（`bin/64bit/ort-cuda/` 或 `ort-dml/`），不会误加载 Windows 11 系统目录里自带的旧版。DirectML 版 ONNX Runtime 停在 1.24.4，CUDA 版用 1.32.0，Windows 版统一按 1.24 的接口编译（新版运行库兼容旧接口）。
+
+macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个模型 1 个线程）：
+
+| 推理设备 | OBS 进程 CPU | 人脸 | 裸露皮肤 | 不雅内容 | 敏感文字 |
+|---|---|---|---|---|---|
+| 仅 CPU | 176% | 12.9 ms | 26.4 ms | 31.9 ms | 81.8 ms |
+| CoreML，CPU + GPU（默认） | 123% | 6.5 ms | 14.6 ms | 24.8 ms | 82.2 ms |
+| CoreML，交给系统分配（ALL） | 117% | 23.6 ms | 28.7 ms | 28.2 ms | 96.6 ms |
+| CoreML，CPU + 神经引擎 | 142% | 12.4 ms | 18.7 ms | 26.5 ms | 75.1 ms |
+
+（同一台机器、相近负载下各测一次，数值有波动；CoreML 下的延迟对齐复测同样无漏出。）
+
+## 配合抖音直播伴侣（OBS 虚拟摄像头）
+
+直播伴侣不支持 OBS 插件，做法是在 OBS 里打码，再用 OBS 自带的虚拟摄像头把画面交给直播伴侣：
+
+1. OBS 里搭好场景，给来源或场景加上「自动马赛克」滤镜；「设置 → 视频」的分辨率设成直播用的分辨率。
+2. 点 OBS 右下角「启动虚拟摄像机」。
+3. 直播伴侣 → 添加素材 →「摄像头」→ 选「OBS Virtual Camera」，铺满画面。
+4. 虚拟摄像头只传画面不传声音：滤镜的画面延迟（默认 150 ms）会让画面比直播伴侣采集的声音晚，需要在直播伴侣里给音频设相同的延迟（如果有这个选项），或调小画面延迟，或用虚拟声卡把声音也经 OBS 延迟后再给直播伴侣。开播前先录一段确认口型。
+5. 不要在直播伴侣里再直接添加游戏、窗口、原始摄像头等素材，那些画面不经过 OBS，不会被打码。
+
+（以上步骤未在 Windows 上实测。）
 
 ## 不雅内容的类别分组
 
@@ -73,7 +108,20 @@
 - 肤色和皮肤相近的衣服（米色、肉色）会抬高皮肤占比；露背装、短裤短裙等介于两者之间的情况没测过，可能需要按实际画面调门槛。
 - 文字通道每秒只检测几次，新出现的文字可能要几百毫秒才被遮住；竖排、倾斜、艺术字、很小的字（低于约 12 像素）可能认不出；号码被拆成多行或中间夹了其他字符时规则匹配不到。
 - 人脸打码默认开启：如果是自己出镜直播，记得关掉，否则自己的脸也会被打码。
-- 只支持 macOS Apple Silicon，Windows 还没做。
+- Windows 版没有在 Windows 上实测过；macOS 只支持 Apple Silicon。
+
+## 安装 Windows 版
+
+从 [Releases](https://github.com/lingchenfs1/obs-auto-mosaic/releases) 或 GitHub Actions 的构建产物下载：
+
+- `obs-auto-mosaic-windows-x64.zip`：主包（含 DirectML 运行库和全部模型）；
+- `obs-auto-mosaic-windows-cuda-addon.zip`：可选的英伟达 CUDA 扩展包。
+
+解压后按里面的 `README-Windows.txt` 安装：把 `obs-face-mosaic` 文件夹复制到 `C:\ProgramData\obs-studio\plugins\`（或以管理员身份运行 `install.ps1`）。
+
+## 构建 Windows 版
+
+由 `.github/workflows/build.yml` 在 GitHub Actions 的 `windows-2022` 上完成：`tools/fetch-deps.sh`（Git Bash）下载 OBS 发布包里的 `obs.dll`、两套 ONNX Runtime 和 DirectML.dll，`tools/make-import-lib.py` 用 `dumpbin` / `lib` 从 `obs.dll` 生成导入库，再用 Visual Studio 2022 构建并打包。推 `v*` 标签时自动建 Release。
 
 ## 构建（macOS，Apple Silicon）
 
@@ -166,7 +214,7 @@ python3 -I tools/check-dumps.py "$PWD/build/detect-test" "$PWD/data/face_detecti
 ## 待办
 
 - 延迟对齐时自动同步音频（现在需要手动设同步偏移）
-- 摄像头实测；Windows 构建；CoreML / DirectML 加速
+- Windows 实测（DirectML、CUDA、抖音直播伴侣虚拟摄像头）；摄像头实测
 - 远处小人、小脸：分块检测
 - 其他敏感内容：窗口区域遮挡、二维码；文字只遮命中的那几个字而不是整行
 
@@ -179,7 +227,7 @@ python3 -I tools/check-dumps.py "$PWD/build/detect-test" "$PWD/data/face_detecti
 | NudeNet 模型 | AGPL-3.0 |
 | YuNet、PP-HumanSeg（opencv_zoo） | MIT、Apache-2.0 |
 | PP-OCRv4（PaddleOCR / RapidOCR） | Apache-2.0 |
-| ONNX Runtime | MIT |
+| ONNX Runtime、DirectML | MIT |
 | stb_image / stb_image_write（`third_party/stb`） | MIT 或 Public Domain |
 | libobs 头文件 | GPL-2.0-or-later |
 

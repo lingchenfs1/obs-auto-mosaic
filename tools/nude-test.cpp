@@ -1,6 +1,7 @@
 // 离线测试 NudeNet：读图片，检测后把框打码写出 PNG，并打印每个框。
 // 用法：nude-test <模型.onnx> <输入尺寸 320|640> <输入图片> <输出.png> [最低分数]
 #include "nude-detector.hpp"
+#include "ort-runtime.hpp"
 
 #include "stb_image.h"
 #include "stb_image_write.h"
@@ -12,6 +13,8 @@
 
 int main(int argc, char **argv)
 {
+	std::string ort_info;
+	ort_runtime_init("", ort_info); // 测试工具只在 macOS 构建，直接用链接进来的运行库
 	if (argc < 5) {
 		fprintf(stderr, "用法：%s <模型.onnx> <输入尺寸> <输入图片> <输出.png> [最低分数]\n", argv[0]);
 		return 2;

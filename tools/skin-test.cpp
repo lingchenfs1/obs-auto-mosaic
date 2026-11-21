@@ -1,6 +1,7 @@
 // 离线测试「裸露皮肤」检测：图片先缩到 640 以内（与插件一致），检测后把框标红写出 PNG。
 // 用法：skin-test <分割模型> <人脸模型> <输入图片> <输出.png> [全身门槛] [躯干门槛]
 #include "skin-detector.hpp"
+#include "ort-runtime.hpp"
 
 #include "stb_image.h"
 #include "stb_image_write.h"
@@ -34,6 +35,8 @@ static std::vector<uint8_t> resize_bilinear(const uint8_t *src, int sw, int sh, 
 
 int main(int argc, char **argv)
 {
+	std::string ort_info;
+	ort_runtime_init("", ort_info); // 测试工具只在 macOS 构建，直接用链接进来的运行库
 	if (argc < 5) {
 		fprintf(stderr, "用法：%s <分割模型> <人脸模型> <输入图片> <输出.png> [全身门槛] [躯干门槛]\n", argv[0]);
 		return 2;

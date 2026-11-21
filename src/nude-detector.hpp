@@ -45,8 +45,11 @@ public:
 	NudeDetector();
 	~NudeDetector();
 
-	bool load(const std::string &model_path, int input_size, std::string &error);
+	// accel：0 = 有 GPU 方案就用，1 = 只用 CPU
+	bool load(const std::string &model_path, int input_size, std::string &error, int accel = 1);
 	bool loaded() const;
+	// 实际使用的推理方案（"CPU"、"CoreML"、"CUDA"、"DirectML"）
+	const std::string &provider() const { return provider_; }
 
 	// rgba：RGBA8 像素，任意尺寸（内部缩放）。返回分数 >= min_score 的结果，按类别分别做 NMS。
 	std::vector<NudeBox> detect(const uint8_t *rgba, int w, int h, int stride, float min_score,
@@ -55,4 +58,5 @@ public:
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl_;
+	std::string provider_ = "CPU";
 };
