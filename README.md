@@ -27,10 +27,10 @@
 | 平台 | 方案 | 说明 |
 |---|---|---|
 | macOS | CoreML（CPU + GPU） | 首次加载每个模型要编译 0.5~2 秒，期间兜底整屏打码 |
-| Windows | CUDA（可选扩展包） | 英伟达显卡专用，需要装好对应版本的 CUDA 和 cuDNN；加不上会自动换 DirectML |
+| Windows | CUDA（可选扩展包） | 英伟达显卡专用，需要装好 CUDA 13.x 和 cuDNN 9.x（CUDA 13 版）；加不上会自动换 DirectML |
 | Windows | DirectML（默认） | 任何支持 DirectX 12 的显卡（英伟达 / AMD / Intel），不用额外安装 |
 
-Windows 上插件按完整路径加载自带的 `onnxruntime.dll`（`bin/64bit/ort-cuda/` 或 `ort-dml/`），不会误加载 Windows 11 系统目录里自带的旧版。DirectML 版 ONNX Runtime 停在 1.24.4，CUDA 版用 1.32.0，Windows 版统一按 1.24 的接口编译（新版运行库兼容旧接口）。
+Windows 上插件按完整路径加载自带的 `onnxruntime.dll`（`bin/64bit/ort-cuda/` 或 `ort-dml/`），不会误加载 Windows 11 系统目录里自带的旧版。DirectML 版 ONNX Runtime 停在 1.24.4，CUDA 版用 1.32.0，Windows 版统一按 1.24 的接口编译（新版运行库兼容旧接口）。CUDA 版的依赖是从构建出的 DLL 里读出来的：导入表里有 `cublas64_13.dll`、`cublasLt64_13.dll`，运行时还会按名字加载 `cudart64_13.dll`、`cudnn64_9.dll` 等。
 
 macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个模型 1 个线程）：
 
