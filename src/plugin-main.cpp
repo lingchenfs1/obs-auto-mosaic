@@ -25,7 +25,7 @@ bool obs_module_load(void)
 	blog(ok ? LOG_INFO : LOG_ERROR, "[face-mosaic] ONNX Runtime：%s", info.c_str());
 
 	obs_register_source(&face_mosaic_filter_info);
-	blog(LOG_INFO, "[face-mosaic] 插件已加载，版本 0.2.0");
+	blog(LOG_INFO, "[face-mosaic] 插件已加载，版本 %s", PLUGIN_VERSION);
 	return true;
 }
 

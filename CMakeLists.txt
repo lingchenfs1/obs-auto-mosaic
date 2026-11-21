@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(obs-face-mosaic VERSION 0.2.0 LANGUAGES C CXX)
+project(obs-face-mosaic VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,6 +12,8 @@ set(ORT_DIR "${CMAKE_SOURCE_DIR}/third_party/onnxruntime" CACHE PATH "onnxruntim
 
 # ONNX Runtime 的 C++ API 函数表由 ort_runtime_init 设置（Windows 上要先按完整路径加载 DLL）
 add_compile_definitions(ORT_API_MANUAL_INIT)
+# 版本号只在 project() 里写一处，插件日志从这里取（方便从用户日志判断装的是哪个版本）
+add_compile_definitions(PLUGIN_VERSION="${PROJECT_VERSION}")
 if(MSVC)
   # 源码是 UTF-8（含中文字符串）；关掉 CRT 的「不安全函数」告警
   add_compile_options(/utf-8 /W3)
