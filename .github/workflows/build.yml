@@ -12,6 +12,7 @@ permissions:
 
 env:
   OBS_VERSION: "33.0.1"
+  PYTHONUTF8: "1" # Windows 上 Python 默认按 cp1252 输出，打印中文会报错
 
 jobs:
   windows:
@@ -66,7 +67,7 @@ jobs:
             obs-auto-mosaic-windows-cuda-addon.zip
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
