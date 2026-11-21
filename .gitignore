@@ -1,0 +1,20 @@
+# 构建产物
+build/
+.DS_Store
+
+# 由 tools/fetch-deps.sh 下载
+third_party/obs-studio/
+third_party/onnxruntime/
+data/*.onnx
+data/seg/
+data/nudenet/
+
+# 由 tools/fetch-test-assets.sh 下载或生成（真人照片，不进仓库）
+test/*.jpg
+test/*.mp4
+test/nsfw-benign/*.jpg
+test/clothed/*.jpg
+# 本机生成的测试场景集合（含绝对路径）
+test/*.json
+# 离线测试工具的输出
+*.png
