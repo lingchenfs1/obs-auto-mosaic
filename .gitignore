@@ -21,3 +21,4 @@ test/*.json
 *.png
 third_party/obs-win/
 third_party/ort-win/
+__pycache__/

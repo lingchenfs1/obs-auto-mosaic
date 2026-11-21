@@ -55,8 +55,7 @@ bool NudeDetector::loaded() const
 bool NudeDetector::load(const std::string &model_path, int input_size, std::string &error, int accel)
 {
 	try {
-		Ort::SessionOptions opts = make_session_options(1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
-		impl_->session = std::make_unique<Ort::Session>(ort_env(), ort_path(model_path).c_str(), opts);
+		impl_->session = make_session(ort_env(), model_path, 1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
 		impl_->input_size = std::max(32, input_size / 32 * 32);
 		return true;
 	} catch (const std::exception &e) {

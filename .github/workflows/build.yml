@@ -34,6 +34,13 @@ jobs:
         shell: pwsh
         run: python tools/make-import-lib.py third_party/obs-win/obs.dll third_party/obs-win/obs.lib
 
+      - name: 检查 DLL 依赖是否齐全
+        shell: pwsh
+        run: |
+          # nvcuda.dll 由显卡驱动提供（构建机器上没有）；DirectML 包只依赖系统自带的 DLL
+          python tools/check-dll-deps.py third_party/ort-win/cuda nvcuda.dll
+          python tools/check-dll-deps.py third_party/ort-win/dml
+
       - name: CUDA 版运行库依赖的 DLL（用来确认需要的 CUDA / cuDNN 版本）
         shell: pwsh
         run: |

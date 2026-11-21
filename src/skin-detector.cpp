@@ -73,8 +73,7 @@ bool SkinDetector::load(const std::string &seg_model, const std::string &face_mo
 			int accel)
 {
 	try {
-		Ort::SessionOptions opts = make_session_options(1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
-		impl_->seg = std::make_unique<Ort::Session>(ort_env(), ort_path(seg_model).c_str(), opts);
+		impl_->seg = make_session(ort_env(), seg_model, 1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
 	} catch (const std::exception &e) {
 		error = e.what();
 		impl_->seg.reset();

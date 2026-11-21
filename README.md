@@ -27,10 +27,10 @@
 | 平台 | 方案 | 说明 |
 |---|---|---|
 | macOS | CoreML（CPU + GPU） | 首次加载每个模型要编译 0.5~2 秒，期间兜底整屏打码 |
-| Windows | CUDA（可选扩展包） | 英伟达显卡专用，需要装好 CUDA 13.x 和 cuDNN 9.x（CUDA 13 版）；加不上会自动换 DirectML |
+| Windows | CUDA（可选扩展包） | 英伟达 RTX 20 系列或更新，驱动 580+；扩展包自带 CUDA 13 和 cuDNN 9 运行库，不用另装；跑不通自动换 DirectML |
 | Windows | DirectML（默认） | 任何支持 DirectX 12 的显卡（英伟达 / AMD / Intel），不用额外安装 |
 
-Windows 上插件按完整路径加载自带的 `onnxruntime.dll`（`bin/64bit/ort-cuda/` 或 `ort-dml/`），不会误加载 Windows 11 系统目录里自带的旧版。DirectML 版 ONNX Runtime 停在 1.24.4，CUDA 版用 1.32.0，Windows 版统一按 1.24 的接口编译（新版运行库兼容旧接口）。CUDA 版的依赖是从构建出的 DLL 里读出来的：导入表里有 `cublas64_13.dll`、`cublasLt64_13.dll`，运行时还会按名字加载 `cudart64_13.dll`、`cudnn64_9.dll` 等。
+Windows 上插件按完整路径加载自带的 `onnxruntime.dll`（`bin/64bit/ort-cuda/` 或 `ort-dml/`），不会误加载 Windows 11 系统目录里自带的旧版。DirectML 版 ONNX Runtime 停在 1.24.4，CUDA 版用 1.32.0，Windows 版统一按 1.24 的接口编译（新版运行库兼容旧接口）。CUDA 版的依赖是从构建出的 DLL 里读出来的：导入表里有 `cublas64_13.dll`、`cublasLt64_13.dll`，运行时还会按名字加载 `cudart64_13.dll`、`cudnn64_9.dll` 等。扩展包自带这些运行库（取自 NVIDIA 在 PyPI 发布的官方 wheel）；因为 Windows 按名字找 DLL 时不会搜插件目录，插件在加载 onnxruntime 前先按完整路径预加载它们，再用人脸模型实际推理一次，通过了才用 CUDA。CI 会检查 `ort-cuda`、`ort-dml` 里每个 DLL 的依赖都齐全（`tools/check-dll-deps.py`）。
 
 macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个模型 1 个线程）：
 
@@ -115,7 +115,7 @@ macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个
 从 [Releases](https://github.com/lingchenfs1/obs-auto-mosaic/releases) 或 GitHub Actions 的构建产物下载：
 
 - `obs-auto-mosaic-windows-x64.zip`：主包（含 DirectML 运行库和全部模型）；
-- `obs-auto-mosaic-windows-cuda-addon.zip`：可选的英伟达 CUDA 扩展包。
+- `obs-auto-mosaic-windows-cuda-addon.zip`：可选的英伟达 CUDA 扩展包（约 1GB，自带 CUDA 13 和 cuDNN 9 运行库）。
 
 解压后按里面的 `README-Windows.txt` 安装：把 `obs-face-mosaic` 文件夹复制到 `C:\ProgramData\obs-studio\plugins\`（或以管理员身份运行 `install.ps1`）。
 
@@ -228,6 +228,7 @@ python3 -I tools/check-dumps.py "$PWD/build/detect-test" "$PWD/data/face_detecti
 | YuNet、PP-HumanSeg（opencv_zoo） | MIT、Apache-2.0 |
 | PP-OCRv4（PaddleOCR / RapidOCR） | Apache-2.0 |
 | ONNX Runtime、DirectML | MIT |
+| CUDA 运行时、cuBLAS、cuDNN、cuFFT、NVRTC（仅 CUDA 扩展包） | NVIDIA 专有许可，按其许可随扩展包分发，许可证全文在 `ort-cuda/licenses/` |
 | stb_image / stb_image_write（`third_party/stb`） | MIT 或 Public Domain |
 | libobs 头文件 | GPL-2.0-or-later |
 

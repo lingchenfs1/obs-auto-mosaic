@@ -8,7 +8,8 @@
 #   third_party/obs-win/obs.dll      OBS 发布包里的 obs.dll（之后用 tools/make-import-lib.py 生成 obs.lib）
 #   third_party/onnxruntime/include  ONNX Runtime 头文件（取 DirectML 包的 1.24，新版运行库兼容旧版接口）
 #   third_party/ort-win/dml          onnxruntime.dll（DirectML 版）+ DirectML.dll
-#   third_party/ort-win/cuda         onnxruntime*.dll（CUDA 版，可选，体积大）
+#   third_party/ort-win/cuda         onnxruntime*.dll（CUDA 版，可选，体积大）+ 随包的 CUDA 13 / cuDNN 9 运行库
+#                                    （取自 NVIDIA 在 PyPI 发布的官方 wheel，许可证放在 licenses/ 下）
 # 用法：tools/fetch-deps.sh
 # 版本可用环境变量覆盖：OBS_VERSION、ORT_VERSION（macOS）、ORT_DML_VERSION、DIRECTML_VERSION、ORT_CUDA_VERSION、
 # 设 SKIP_CUDA=1 不下载 CUDA 版运行库。
@@ -19,6 +20,8 @@ ORT_VERSION="${ORT_VERSION:-1.32.0}"
 ORT_DML_VERSION="${ORT_DML_VERSION:-1.24.4}"
 DIRECTML_VERSION="${DIRECTML_VERSION:-1.15.4}"
 ORT_CUDA_VERSION="${ORT_CUDA_VERSION:-1.32.0}"
+# 随 CUDA 扩展包分发的 NVIDIA 运行库（PyPI 包名==版本）。onnxruntime 1.32 CUDA 版需要 CUDA 13 + cuDNN 9
+NVIDIA_WHEELS="${NVIDIA_WHEELS:-nvidia-cuda-runtime==13.5.37 nvidia-cublas==13.10.0.20 nvidia-cudnn-cu13==9.28.1.4 nvidia-cufft==12.5.0.14 nvidia-cuda-nvrtc==13.5.37}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
 
@@ -32,7 +35,7 @@ esac
 # 从 zip / nupkg 里解出若干成员：unzip_members <压缩包> <目标目录> <成员前缀>...
 # 只取以给定前缀开头的文件，按原路径放到目标目录下（用 Python，Git Bash 不一定有 unzip）
 unzip_members() {
-	"${PY}" - "$@" <<'EOF'
+	"${PY}" - "$@" <<'PYEOF'
 import os, sys, zipfile
 src, dst, prefixes = sys.argv[1], sys.argv[2], sys.argv[3:]
 with zipfile.ZipFile(src) as z:
@@ -42,7 +45,44 @@ with zipfile.ZipFile(src) as z:
             os.makedirs(os.path.dirname(out), exist_ok=True)
             with z.open(n) as f, open(out, "wb") as o:
                 o.write(f.read())
-EOF
+PYEOF
+}
+
+# 从 PyPI 下载某个包某个版本的 win_amd64 wheel：pypi_wheel <包名> <版本> <保存路径>
+pypi_wheel() {
+	local url
+	url="$(curl -fsSL "https://pypi.org/pypi/$1/$2/json" | "${PY}" -c "
+import json, sys
+urls = [f['url'] for f in json.load(sys.stdin)['urls'] if f['filename'].endswith('win_amd64.whl')]
+print(urls[0] if urls else '')")"
+	if [ -z "${url}" ]; then
+		echo "PyPI 上找不到 $1 $2 的 Windows 包" >&2
+		return 1
+	fi
+	curl -fsSL -o "$3" "${url}"
+}
+
+# 从 wheel 里取出所有 .dll（不管在哪个子目录，平铺到目标目录）和许可证文件（放到 目标目录/licenses/<包名>-<文件名>）
+extract_wheel_dlls() { # <wheel> <目标目录> <包名>
+	"${PY}" - "$@" <<'PYEOF'
+import os, sys, zipfile
+whl, dst, pkg = sys.argv[1], sys.argv[2], sys.argv[3]
+os.makedirs(os.path.join(dst, "licenses"), exist_ok=True)
+n_dll = 0
+with zipfile.ZipFile(whl) as z:
+    for n in z.namelist():
+        base = n.rsplit("/", 1)[-1]
+        if base.lower().endswith(".dll"):
+            out = os.path.join(dst, base)
+            n_dll += 1
+        elif ".dist-info/" in n and base.lower().startswith(("license", "notice")):
+            out = os.path.join(dst, "licenses", f"{pkg}-{base}")
+        else:
+            continue
+        with z.open(n) as f, open(out, "wb") as o:
+            o.write(f.read())
+print(f"  {pkg}: {n_dll} 个 DLL")
+PYEOF
 }
 
 nuget() { # <包名（小写）> <版本> <保存路径>
@@ -103,6 +143,15 @@ elif [ "${OS}" = windows ]; then
 		# 只要 onnxruntime 本体、共享层和 CUDA 方案；TensorRT 方案用不上，体积大，不要
 		for f in onnxruntime.dll onnxruntime_providers_shared.dll onnxruntime_providers_cuda.dll; do
 			cp "${tmp}/cuda/runtimes/win-x64/native/${f}" third_party/ort-win/cuda/
+		done
+		# 随包的 CUDA / cuDNN 运行库：用户不用再装 CUDA Toolkit 和 cuDNN（显卡驱动仍需自己装）
+		echo "下载 NVIDIA 运行库：${NVIDIA_WHEELS}"
+		for spec in ${NVIDIA_WHEELS}; do
+			pkg="${spec%%==*}"
+			ver="${spec##*==}"
+			pypi_wheel "${pkg}" "${ver}" "${tmp}/${pkg}.whl"
+			extract_wheel_dlls "${tmp}/${pkg}.whl" third_party/ort-win/cuda "${pkg}"
+			rm -f "${tmp}/${pkg}.whl"
 		done
 	fi
 	rm -rf "${tmp}"

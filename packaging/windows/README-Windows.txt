@@ -21,10 +21,11 @@
   3. 打开 OBS，在要处理的来源（或场景）上右键 →「滤镜」→「效果滤镜」→「+」→「自动马赛克」。
 
 三、英伟达显卡加速（可选，更快）
-  默认用 DirectML（显卡通用，不用额外安装）。想用 CUDA：
-  1. 下载 obs-auto-mosaic-windows-cuda-addon.zip，按其中 README-CUDA.txt 安装 CUDA 和 cuDNN。
-  2. 把压缩包里的 obs-face-mosaic 文件夹复制到同一位置（和原来的合并）。
-  插件启动时先试 CUDA，不可用就自动换回 DirectML。
+  默认用 DirectML（显卡通用，不用额外安装）。想用 CUDA（RTX 20 系列或更新的英伟达显卡）：
+  1. 把显卡驱动更新到 580 系列或更新。
+  2. 下载 obs-auto-mosaic-windows-cuda-addon.zip（约 1GB，已自带 CUDA 13 和 cuDNN 9，不用另装），
+     把里面的 obs-face-mosaic 文件夹复制到同一位置（和原来的合并）。
+  插件启动时先用 CUDA 实际跑一次模型，跑通才用 CUDA，否则自动换回 DirectML。
 
   确认实际用的是哪种：OBS 菜单「帮助」→「日志文件」→「查看当前日志」，搜索 [face-mosaic]：
     「ONNX Runtime：使用 CUDA 运行库」或「使用 DirectML 运行库」

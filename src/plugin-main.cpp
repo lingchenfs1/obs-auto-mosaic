@@ -16,8 +16,12 @@ bool obs_module_load(void)
 	std::string dir = bin ? bin : "";
 	size_t slash = dir.find_last_of("/\\");
 	dir = slash == std::string::npos ? std::string(".") : dir.substr(0, slash);
+	// 用最小的人脸模型实测 GPU 方案能不能真正跑起来
+	char *test = obs_module_file("face_detection_yunet_2023mar.onnx");
+	std::string test_model = test ? test : "";
+	bfree(test);
 	std::string info;
-	bool ok = ort_runtime_init(dir, info);
+	bool ok = ort_runtime_init(dir, info, test_model);
 	blog(ok ? LOG_INFO : LOG_ERROR, "[face-mosaic] ONNX Runtime：%s", info.c_str());
 
 	obs_register_source(&face_mosaic_filter_info);

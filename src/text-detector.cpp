@@ -183,9 +183,8 @@ bool TextDetector::loaded() const
 bool TextDetector::load(const std::string &det_model, const std::string &rec_model, std::string &error, int accel)
 {
 	try {
-		Ort::SessionOptions opts = make_session_options(1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
-		impl_->det = std::make_unique<Ort::Session>(ort_env(), ort_path(det_model).c_str(), opts);
-		impl_->rec = std::make_unique<Ort::Session>(ort_env(), ort_path(rec_model).c_str(), opts);
+		impl_->det = make_session(ort_env(), det_model, 1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly, &provider_);
+		impl_->rec = make_session(ort_env(), rec_model, 1, accel == 0 ? OrtAccel::Auto : OrtAccel::CpuOnly);
 
 		// 字典在识别模型的元数据里，每行一个字
 		Ort::AllocatorWithDefaultOptions alloc;

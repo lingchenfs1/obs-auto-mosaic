@@ -3,8 +3,10 @@
 #include <onnxruntime_session_options_config_keys.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <mutex>
+#include <vector>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -62,22 +64,83 @@ bool load_ort_dll(const std::wstring &path, std::string &err)
 	return true;
 }
 
-// 试着把 CUDA 方案加到一个临时会话设置上：CUDA / cuDNN 缺失或版本不对时这里就会报错。
-// 期间关掉「找不到 DLL」的系统弹窗。
-bool cuda_provider_works(std::string &err)
+std::vector<HMODULE> g_nvidia; // 预加载的随包 NVIDIA 运行库
+
+// 按完整路径预加载 ort-cuda 目录里随包的 CUDA / cuDNN 运行库。
+// onnxruntime 之后按文件名找 cudnn64_9.dll 等时，Windows 直接用已加载的这份：
+// 不依赖 PATH，也不会混用系统里装的其他版本。目录里没有这些 DLL（旧版扩展包）时什么都不做。
+int preload_nvidia_dlls(const std::wstring &dir)
 {
-	DWORD old_mode = 0;
-	SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &old_mode);
-	struct Restore {
-		DWORD mode;
-		~Restore() { SetThreadErrorMode(mode, nullptr); }
-	} restore{old_mode};
+	std::vector<std::wstring> names;
+	WIN32_FIND_DATAW fd;
+	HANDLE h = FindFirstFileW((dir + L"\\*.dll").c_str(), &fd);
+	if (h != INVALID_HANDLE_VALUE) {
+		do {
+			names.push_back(fd.cFileName);
+		} while (FindNextFileW(h, &fd));
+		FindClose(h);
+	}
+	// 被依赖的先加载；同一前缀内按文件名顺序
+	std::sort(names.begin(), names.end());
+	const wchar_t *order[] = {L"cudart64_", L"cublasLt64_",       L"cublas64_",      L"cufft64_",
+				  L"nvrtc-builtins", L"nvrtc64_", L"cudnn_graph64_", L"cudnn"};
+	std::vector<bool> done(names.size(), false);
+	for (const wchar_t *prefix : order) {
+		size_t len = wcslen(prefix);
+		for (size_t i = 0; i < names.size(); i++) {
+			if (done[i] || _wcsnicmp(names[i].c_str(), prefix, len) != 0)
+				continue;
+			done[i] = true;
+			HMODULE m = LoadLibraryExW((dir + L"\\" + names[i]).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			if (m)
+				g_nvidia.push_back(m);
+		}
+	}
+	return (int)g_nvidia.size();
+}
+
+void free_nvidia_dlls()
+{
+	for (auto it = g_nvidia.rbegin(); it != g_nvidia.rend(); ++it)
+		FreeLibrary(*it);
+	g_nvidia.clear();
+}
+
+// 用 CUDA 真正加载一个模型并推理一次：驱动太旧、显卡不支持、cuDNN 有问题，都要到这一步才会暴露。
+bool cuda_session_works(const std::string &test_model, std::string &err)
+{
 	try {
+		Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "obs-face-mosaic-cuda-check");
 		Ort::SessionOptions so;
 		OrtCUDAProviderOptionsV2 *opts = nullptr;
 		Ort::ThrowOnError(Ort::GetApi().CreateCUDAProviderOptions(&opts));
 		so.AppendExecutionProvider_CUDA_V2(*opts);
 		Ort::GetApi().ReleaseCUDAProviderOptions(opts);
+		if (test_model.empty())
+			return true; // 没有测试模型时只能检查到这一步
+		Ort::Session session(env, widen(test_model).c_str(), so);
+
+		// 按模型的输入形状造一个全 0 输入（可变维度取 1），跑一次
+		Ort::AllocatorWithDefaultOptions alloc;
+		auto in_name = session.GetInputNameAllocated(0, alloc);
+		std::vector<int64_t> shape = session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+		size_t count = 1;
+		for (int64_t &d : shape) {
+			if (d <= 0)
+				d = 1;
+			count *= (size_t)d;
+		}
+		std::vector<float> data(count, 0.0f);
+		auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+		Ort::Value input = Ort::Value::CreateTensor<float>(mem, data.data(), data.size(), shape.data(), shape.size());
+		std::vector<Ort::AllocatedStringPtr> out_names_alloc;
+		std::vector<const char *> out_names;
+		for (size_t i = 0; i < session.GetOutputCount(); i++) {
+			out_names_alloc.push_back(session.GetOutputNameAllocated(i, alloc));
+			out_names.push_back(out_names_alloc.back().get());
+		}
+		const char *in_names[] = {in_name.get()};
+		session.Run(Ort::RunOptions{nullptr}, in_names, &input, 1, out_names.data(), out_names.size());
 		return true;
 	} catch (const std::exception &e) {
 		err = e.what();
@@ -88,7 +151,7 @@ bool cuda_provider_works(std::string &err)
 
 } // namespace
 
-bool ort_runtime_init(const std::string &plugin_dir, std::string &info)
+bool ort_runtime_init(const std::string &plugin_dir, std::string &info, const std::string &test_model)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 	if (g_ready) {
@@ -105,20 +168,29 @@ bool ort_runtime_init(const std::string &plugin_dir, std::string &info)
 	std::string err;
 	bool try_cuda = want != "dml" && file_exists(cuda_dll);
 	if (try_cuda) {
+		// 试 CUDA 期间关掉「找不到 DLL」之类的系统弹窗
+		DWORD old_mode = 0;
+		SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &old_mode);
+		int preloaded = preload_nvidia_dlls(dir + L"\\ort-cuda");
+		std::string pre = preloaded ? "，预加载随包的 NVIDIA 运行库 " + std::to_string(preloaded) + " 个" : "";
+		bool ok = false;
 		if (load_ort_dll(cuda_dll, err)) {
-			if (cuda_provider_works(err)) {
-				g_gpu = "CUDA";
-				g_ready = true;
-				info = "使用 CUDA 运行库（ort-cuda）";
-				return true;
+			ok = cuda_session_works(test_model, err);
+			if (!ok) {
+				FreeLibrary(g_ort);
+				g_ort = nullptr;
 			}
-			// CUDA 方案加不上：卸掉这份运行库，换 DirectML
-			FreeLibrary(g_ort);
-			g_ort = nullptr;
-			info = "CUDA 不可用（" + err + "），改用 DirectML；";
-		} else {
-			info = "加载 ort-cuda 失败（" + err + "），改用 DirectML；";
 		}
+		SetThreadErrorMode(old_mode, nullptr);
+		if (ok) {
+			g_gpu = "CUDA";
+			g_ready = true;
+			info = "使用 CUDA 运行库（ort-cuda" + pre + "，实测推理通过）";
+			return true;
+		}
+		// CUDA 不可用：卸掉这份运行库和预加载的 NVIDIA 库，换 DirectML
+		free_nvidia_dlls();
+		info = "CUDA 不可用（" + err + pre + "），改用 DirectML；";
 	}
 	if (!file_exists(dml_dll)) {
 		info += "找不到 ort-dml\\onnxruntime.dll";
@@ -134,6 +206,7 @@ bool ort_runtime_init(const std::string &plugin_dir, std::string &info)
 	return true;
 #else
 	(void)plugin_dir;
+	(void)test_model;
 	Ort::InitApi();
 #ifdef __APPLE__
 	g_gpu = "CoreML";
@@ -202,6 +275,28 @@ Ort::SessionOptions make_session_options(int threads, OrtAccel accel, std::strin
 	if (used)
 		*used = provider;
 	return opts;
+}
+
+std::unique_ptr<Ort::Session> make_session(Ort::Env &env, const std::string &model_path, int threads, OrtAccel accel,
+					   std::string *used)
+{
+	std::string provider;
+	if (accel == OrtAccel::Auto && *ort_gpu_provider()) {
+		try {
+			Ort::SessionOptions opts = make_session_options(threads, accel, &provider);
+			auto s = std::make_unique<Ort::Session>(env, ort_path(model_path).c_str(), opts);
+			if (used)
+				*used = provider;
+			return s;
+		} catch (const std::exception &) {
+			// GPU 上建不起来（显存不够、算子不支持等）：退回 CPU，不让一个模型的问题变成整屏打码
+		}
+	}
+	Ort::SessionOptions opts = make_session_options(threads, OrtAccel::CpuOnly, &provider);
+	auto s = std::make_unique<Ort::Session>(env, ort_path(model_path).c_str(), opts);
+	if (used)
+		*used = accel == OrtAccel::Auto && *ort_gpu_provider() ? "CPU（GPU 加载失败）" : "CPU";
+	return s;
 }
 
 std::basic_string<ORTCHAR_T> ort_path(const std::string &utf8)
