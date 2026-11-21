@@ -9,12 +9,15 @@ data/*.onnx
 data/seg/
 data/nudenet/
 data/ocr/
+data/scene/*.onnx
 
 # 由 tools/fetch-test-assets.sh 下载或生成（真人照片，不进仓库）
 test/*.jpg
 test/*.mp4
 test/nsfw-benign/*.jpg
 test/clothed/*.jpg
+test/violence/*.jpg
+test/violence/*.png
 # 本机生成的测试场景集合（含绝对路径）
 test/*.json
 # 离线测试工具的输出

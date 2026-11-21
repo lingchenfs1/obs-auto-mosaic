@@ -24,11 +24,13 @@ set(MODELS
   "${CMAKE_SOURCE_DIR}/data/ocr/ch_PP-OCRv4_det_infer.onnx"
   "${CMAKE_SOURCE_DIR}/data/ocr/ch_PP-OCRv4_rec_infer.onnx"
   "${CMAKE_SOURCE_DIR}/data/nudenet/320n.onnx"
-  "${CMAKE_SOURCE_DIR}/data/nudenet/640m.onnx")
+  "${CMAKE_SOURCE_DIR}/data/nudenet/640m.onnx"
+  "${CMAKE_SOURCE_DIR}/data/scene/clip_vision_int8.onnx"
+  "${CMAKE_SOURCE_DIR}/data/scene/clip_prompts.bin")
 
 # ---- 检测器（插件和测试工具共用）----
 add_library(face_detector STATIC src/face-detector.cpp src/nude-detector.cpp src/skin-detector.cpp
-  src/text-detector.cpp src/ort-runtime.cpp)
+  src/text-detector.cpp src/scene-detector.cpp src/ort-runtime.cpp)
 target_include_directories(face_detector PUBLIC src "${ORT_DIR}/include")
 set_target_properties(face_detector PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -43,7 +45,7 @@ if(APPLE)
   target_link_libraries(face_detector PUBLIC "${ORT_DYLIB}")
 
   # ---- 离线测试工具（只在 macOS 构建）----
-  foreach(tool detect-test nude-test skin-test text-test)
+  foreach(tool detect-test nude-test skin-test text-test scene-test)
     if(tool STREQUAL "detect-test")
       add_executable(${tool} tools/${tool}.cpp)
     else()

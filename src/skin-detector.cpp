@@ -281,21 +281,24 @@ std::vector<SkinBox> SkinDetector::detect(const uint8_t *rgba, int w, int h, int
 		if (!is_exposed)
 			continue;
 
-		// ---- 5. 裸露的人：身上的皮肤块（不含脸）各输出一个框 ----
+		// ---- 5. 裸露的人：只输出一个框，包住他身上所有成块的裸露皮肤（不含脸）----
+		// 原来每个皮肤块各一个框，一个人会被切成十几块小码；合成一个更干净，也不会漏掉块与块之间的缝。
 		std::fill(in_comp.begin(), in_comp.end(), 0);
 		for (int c : cells)
 			in_comp[c] = exposed[c];
 		std::vector<int> blabel;
+		int x0 = gw, y0 = gh, x1 = -1, y1 = -1;
 		for (const auto &blob : components(in_comp, gw, gh, blabel)) {
 			if (blob.size() < 3)
-				continue;
-			int x0 = gw, y0 = gh, x1 = -1, y1 = -1;
+				continue; // 零星几格多半是误判，不算
 			for (int c : blob) {
 				x0 = std::min(x0, c % gw);
 				y0 = std::min(y0, c / gw);
 				x1 = std::max(x1, c % gw);
 				y1 = std::max(y1, c / gw);
 			}
+		}
+		if (x1 >= 0) {
 			float cw = (float)w / gw, ch = (float)h / gh;
 			result.push_back({x0 * cw, y0 * ch, (x1 - x0 + 1) * cw, (y1 - y0 + 1) * ch, body, torso});
 		}

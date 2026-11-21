@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 下载构建所需的依赖和模型（都不放进仓库）：
 #   third_party/obs-studio   libobs 头文件（版本跟目标 OBS 一致）
-#   data/                    YuNet、PP-HumanSeg（opencv_zoo）、PP-OCRv4（RapidOCR 导出的 ONNX）、NudeNet v3（320n / 640m）
+#   data/                    YuNet、PP-HumanSeg（opencv_zoo）、PP-OCRv4（RapidOCR 导出的 ONNX）、NudeNet v3（320n / 640m）、
+#                            CLIP ViT-B/32 图像模型（Xenova 导出的 int8 ONNX）
 # macOS：
 #   third_party/onnxruntime  ONNX Runtime（NuGet 官方包里的 macOS arm64 动态库和头文件）
 # Windows（Git Bash，GitHub Actions 用）：
@@ -172,6 +173,9 @@ fetch data/seg/pphumanseg_2023mar.onnx \
 for m in ch_PP-OCRv4_det_infer.onnx ch_PP-OCRv4_rec_infer.onnx; do
 	fetch "data/ocr/${m}" "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/${m}"
 done
+# 血腥暴力检测：CLIP ViT-B/32 图像模型（int8，MIT）；文字向量 data/scene/clip_prompts.bin 已在仓库里
+fetch data/scene/clip_vision_int8.onnx \
+	https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_int8.onnx
 
 # NudeNet 的 release 文件直链会跳转到 GitHub 登录页，需要用已登录的 gh 下载（GitHub Actions 里用 GH_TOKEN）
 mkdir -p data/nudenet
@@ -189,7 +193,7 @@ for m in 320n.onnx 640m.onnx; do
 done
 
 # 下载到的模型如果是网页（被重定向到登录页等），文件开头会是 HTML
-for f in data/face_detection_yunet_2023mar.onnx data/seg/pphumanseg_2023mar.onnx data/ocr/*.onnx data/nudenet/*.onnx; do
+for f in data/face_detection_yunet_2023mar.onnx data/seg/pphumanseg_2023mar.onnx data/ocr/*.onnx data/nudenet/*.onnx data/scene/*.onnx; do
 	if grep -qi "<html\|<!doctype" < <(head -c 64 "${f}"); then
 		echo "${f} 下载到的是网页而不是模型，请删掉后重试" >&2
 		exit 1

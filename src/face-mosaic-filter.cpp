@@ -25,6 +25,7 @@
 #include "nude-detector.hpp"
 #include "skin-detector.hpp"
 #include "text-detector.hpp"
+#include "scene-detector.hpp"
 #include "ort-runtime.hpp"
 
 #include "stb_image_write.h"
@@ -116,9 +117,10 @@ technique Solid
 constexpr size_t kMaxHistory = 256;
 constexpr int kMaxDelayFrames = 60;
 
-enum ChannelKind { CH_FACE = 0, CH_NUDE = 1, CH_SKIN = 2, CH_TEXT = 3, CH_COUNT = 4 };
-const char *kChannelName[CH_COUNT] = {"人脸", "不雅内容", "裸露皮肤", "敏感文字"};
-constexpr int kClsFace = -1, kClsSkin = -2, kClsText = -3; // Track.cls；>= 0 为 NudeClass
+enum ChannelKind { CH_FACE = 0, CH_NUDE = 1, CH_SKIN = 2, CH_TEXT = 3, CH_SCENE = 4, CH_COUNT = 5 };
+const char *kChannelName[CH_COUNT] = {"人脸", "不雅内容", "裸露皮肤", "敏感文字", "血腥暴力"};
+// Track.cls；>= 0 为 NudeClass。kClsScene 是整个画面（血腥暴力），出现时整屏打码
+constexpr int kClsFace = -1, kClsSkin = -2, kClsText = -3, kClsScene = -4;
 const int kTextLimits[4] = {640, 800, 960, 1280};
 
 // 不雅类别分组（设置里按组开关）
@@ -131,7 +133,44 @@ enum NudeGroup {
 };
 const char *kGroupKey[G_COUNT] = {"nude_g_exposed", "nude_g_covered", "nude_g_skin", "nude_g_feet"};
 const char *kGroupText[G_COUNT] = {"NudeGroup.Exposed", "NudeGroup.Covered", "NudeGroup.Skin", "NudeGroup.Feet"};
-const bool kGroupDefault[G_COUNT] = {true, false, true, false}; // 「遮盖」组普通衣服也会触发，默认关；泳装由裸露皮肤通道覆盖
+// 默认只开「暴露」组：「遮盖」组普通衣服也会触发；「赤裸上身、腹部、腋下」组误报多，大面积裸露交给裸露皮肤通道
+const bool kGroupDefault[G_COUNT] = {true, false, false, false};
+
+// 「打码范围」预设：0 只打色情、裸露、血腥暴力；1 全部；2 自定义（按各通道自己的开关）
+enum Scope { SCOPE_NSFW = 0, SCOPE_ALL = 1, SCOPE_CUSTOM = 2 };
+struct ScopePreset {
+	bool face, text, nude, skin, scene;
+	bool groups[G_COUNT];
+};
+const ScopePreset kScopePresets[2] = {
+	{false, false, true, true, true, {true, false, false, false}},
+	{true, true, true, true, true, {true, false, true, false}},
+};
+
+void apply_scope(obs_data_t *s, int scope)
+{
+	const ScopePreset &p = kScopePresets[scope];
+	obs_data_set_bool(s, "face_enabled", p.face);
+	obs_data_set_bool(s, "text_enabled", p.text);
+	obs_data_set_bool(s, "nude_enabled", p.nude);
+	obs_data_set_bool(s, "skin_enabled", p.skin);
+	obs_data_set_bool(s, "scene_enabled", p.scene);
+	for (int g = 0; g < G_COUNT; g++)
+		obs_data_set_bool(s, kGroupKey[g], p.groups[g]);
+}
+
+bool scope_matches(obs_data_t *s, int scope)
+{
+	const ScopePreset &p = kScopePresets[scope];
+	if (obs_data_get_bool(s, "face_enabled") != p.face || obs_data_get_bool(s, "text_enabled") != p.text ||
+	    obs_data_get_bool(s, "nude_enabled") != p.nude || obs_data_get_bool(s, "skin_enabled") != p.skin ||
+	    obs_data_get_bool(s, "scene_enabled") != p.scene)
+		return false;
+	for (int g = 0; g < G_COUNT; g++)
+		if (obs_data_get_bool(s, kGroupKey[g]) != p.groups[g])
+			return false;
+	return true;
+}
 
 int nude_group(int cls)
 {
@@ -193,6 +232,7 @@ struct Channel {
 	NudeDetector nude;
 	SkinDetector skin;
 	TextDetector text;
+	SceneDetector scene;
 
 	std::thread worker;
 	std::mutex job_mutex;
@@ -204,6 +244,8 @@ struct Channel {
 	uint64_t job_seq = 0;
 	std::atomic<bool> busy{false};
 	uint64_t last_job_ns = 0; // 渲染线程：最近一次交任务的时间
+	uint64_t min_interval_ns = 0; // 渲染线程：两次交任务的最小间隔（0 = 跟随检测频率）
+	float stat_max_gore = 0, stat_max_violence = 0; // 推理线程：血腥暴力通道 10 秒内的最高分（只记数字）
 
 	std::mutex track_mutex;
 	std::vector<Track> tracks;
@@ -242,6 +284,9 @@ struct FaceMosaic {
 	std::atomic<float> nude_threshold{0.2f};
 	std::atomic<uint32_t> nude_groups{0};
 	int nude_action = 0; // 0 局部打码，1 出现暴露部位时整屏打码
+	int last_scope = -1;  // 上一次 update 时的「打码范围」（-1 = 刚创建）
+	std::atomic<bool> scene_gore{true}, scene_violence{true};
+	std::atomic<float> scene_threshold{0.5f};
 	std::atomic<float> skin_body{0.4f};
 	std::atomic<float> skin_torso{0.6f};
 	std::mutex text_mutex; // 保护 text_rules（推理线程读、update 写）
@@ -257,6 +302,7 @@ struct FaceMosaic {
 	std::string nude_model_path[2];
 	std::string seg_model_path;
 	std::string ocr_det_path, ocr_rec_path;
+	std::string clip_model_path, clip_prompts_path;
 
 	Channel ch[CH_COUNT];
 
@@ -290,6 +336,7 @@ struct FaceMosaic {
 	int rstat_aligned = 0; // 输出帧前后都有检测结果（真正对齐）的帧数
 	int rstat_fullscreen = 0; // 兜底（检测停顿）导致的整屏
 	int rstat_exposed = 0;    // 「检测到暴露部位时整屏打码」导致的整屏
+	int rstat_scene = 0;      // 检测到血腥暴力导致的整屏
 };
 
 // 新检测结果和同类别的旧框匹配：IoU 足够大，或者中心距离不超过框尺寸（快速移动时 IoU 可能为 0）
@@ -345,11 +392,16 @@ void load_model(FaceMosaic *f, Channel *c, int want)
 			ok = c->skin.load(f->seg_model_path, f->face_model_path, err, accel);
 		else
 			c->skin.load("", "", err);
-	} else {
+	} else if (c->kind == CH_TEXT) {
 		if (model >= 0)
 			ok = c->text.load(f->ocr_det_path, f->ocr_rec_path, err, accel);
 		else
 			c->text.load("", "", err);
+	} else {
+		if (model >= 0)
+			ok = c->scene.load(f->clip_model_path, f->clip_prompts_path, err); // 量化模型，固定 CPU
+		else
+			c->scene.load("", "", err);
 	}
 	c->loaded_model = want;
 	c->model_ok = ok;
@@ -358,13 +410,15 @@ void load_model(FaceMosaic *f, Channel *c, int want)
 	const std::string &provider = c->kind == CH_FACE   ? c->face.provider()
 				      : c->kind == CH_NUDE ? c->nude.provider()
 				      : c->kind == CH_SKIN ? c->skin.provider()
-							   : c->text.provider();
+				      : c->kind == CH_TEXT ? c->text.provider()
+							   : std::string("CPU");
 	if (ok)
 		blog(LOG_INFO, "[face-mosaic] %s模型已加载（%s，%s），用时 %.0f ms", kChannelName[c->kind],
 		     c->kind == CH_FACE   ? "YuNet"
 		     : c->kind == CH_NUDE ? kNudeModelFile[model]
 		     : c->kind == CH_SKIN ? "PP-HumanSeg + YuNet"
-					  : "PP-OCRv4",
+		     : c->kind == CH_TEXT ? "PP-OCRv4"
+					  : "CLIP ViT-B/32 int8",
 		     provider.c_str(), (os_gettime_ns() - t0) / 1e6);
 	else
 		blog(LOG_ERROR, "[face-mosaic] %s模型加载失败：%s", kChannelName[c->kind], err.c_str());
@@ -384,6 +438,13 @@ std::vector<Track> run_detection(FaceMosaic *f, Channel *c, const std::vector<ui
 		params.torso_threshold = f->skin_torso;
 		for (const SkinBox &b : c->skin.detect(px.data(), w, h, w * 4, params))
 			out.push_back({b.x / w, b.y / h, b.w / w, b.h / h, now, 0, kClsSkin});
+	} else if (c->kind == CH_SCENE) {
+		SceneScores sc = c->scene.detect(px.data(), w, h, w * 4);
+		c->stat_max_gore = std::max(c->stat_max_gore, sc.gore);
+		c->stat_max_violence = std::max(c->stat_max_violence, sc.violence);
+		float thr = f->scene_threshold;
+		if ((f->scene_gore && sc.gore >= thr) || (f->scene_violence && sc.violence >= thr))
+			out.push_back({0.0f, 0.0f, 1.0f, 1.0f, now, 0, kClsScene}); // 整个画面
 	} else if (c->kind == CH_TEXT) {
 		TextRules rules;
 		{
@@ -440,6 +501,8 @@ void worker_loop(FaceMosaic *f, Channel *c)
 		uint64_t hold_ns = f->hold_ns;
 		if (c->kind == CH_TEXT)
 			hold_ns = std::max<uint64_t>(hold_ns, 1500ULL * 1000000ULL);
+		if (c->kind == CH_SCENE) // 整屏打码至少保持 2 秒，避免分数在门槛附近时来回闪
+			hold_ns = std::max<uint64_t>(hold_ns, 2000ULL * 1000000ULL);
 
 		{
 			std::lock_guard<std::mutex> lock(c->track_mutex);
@@ -475,9 +538,17 @@ void worker_loop(FaceMosaic *f, Channel *c)
 		if (c->stat_start_ns == 0)
 			c->stat_start_ns = now;
 		if (now - c->stat_start_ns > 10ULL * 1000000000ULL) {
-			blog(LOG_INFO, "[face-mosaic] %s：最近 10 秒检测 %d 次，平均 %.1f ms，平均每次 %.1f 个框",
-			     kChannelName[c->kind], c->stat_runs, c->stat_ms / c->stat_runs,
-			     (double)c->stat_boxes / c->stat_runs);
+			if (c->kind == CH_SCENE)
+				blog(LOG_INFO,
+				     "[face-mosaic] %s：最近 10 秒检测 %d 次，平均 %.1f ms，触发 %d 次，最高分 血腥 %.2f / 暴力 %.2f",
+				     kChannelName[c->kind], c->stat_runs, c->stat_ms / c->stat_runs, (int)c->stat_boxes,
+				     c->stat_max_gore, c->stat_max_violence);
+			else
+				blog(LOG_INFO, "[face-mosaic] %s：最近 10 秒检测 %d 次，平均 %.1f ms，平均每次 %.1f 个框",
+				     kChannelName[c->kind], c->stat_runs, c->stat_ms / c->stat_runs,
+				     (double)c->stat_boxes / c->stat_runs);
+			c->stat_max_gore = 0;
+			c->stat_max_violence = 0;
 			c->stat_start_ns = now;
 			c->stat_runs = 0;
 			c->stat_ms = 0;
@@ -528,6 +599,29 @@ void fm_update(void *data, obs_data_t *settings)
 	f->delay_ms = std::max(0, (int)obs_data_get_int(settings, "delay_ms"));
 	f->fail_safe = obs_data_get_bool(settings, "fail_safe");
 	const int accel = std::clamp((int)obs_data_get_int(settings, "accel"), 0, 1);
+
+	// 「打码范围」预设：
+	// - 打码范围变了（刚选了预设，或滤镜刚加载）：按预设设置各通道开关；
+	// - 打码范围没变、开关却和预设不一致：用户手动改了开关，切成「自定义」。
+	// 不依赖界面回调和 update 的先后顺序。旧版本建的滤镜没存过打码范围，按默认预设处理。
+	int scope = std::clamp((int)obs_data_get_int(settings, "scope"), 0, 2);
+	if (scope != SCOPE_CUSTOM) {
+		if (scope != f->last_scope) {
+			apply_scope(settings, scope);
+		} else if (!scope_matches(settings, scope)) {
+			scope = SCOPE_CUSTOM;
+			obs_data_set_int(settings, "scope", scope);
+		}
+	}
+	f->last_scope = scope;
+
+	f->scene_gore = obs_data_get_bool(settings, "scene_gore");
+	f->scene_violence = obs_data_get_bool(settings, "scene_violence");
+	f->scene_threshold = (float)obs_data_get_int(settings, "scene_threshold") / 100.0f;
+	f->ch[CH_SCENE].min_interval_ns = 1000000000ULL / std::max(1, (int)obs_data_get_int(settings, "scene_fps"));
+	bool scene_on = obs_data_get_bool(settings, "scene_enabled");
+	f->ch[CH_SCENE].enabled = scene_on;
+	set_want_model(&f->ch[CH_SCENE], want_code(scene_on ? 0 : -1, accel));
 
 	f->face_threshold = (float)obs_data_get_double(settings, "threshold");
 	bool face_on = obs_data_get_bool(settings, "face_enabled");
@@ -582,8 +676,16 @@ void fm_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "delay_ms", 150);
 	obs_data_set_default_bool(settings, "fail_safe", true);
 	obs_data_set_default_int(settings, "accel", 0);
+	obs_data_set_default_int(settings, "scope", SCOPE_NSFW);
 
-	obs_data_set_default_bool(settings, "face_enabled", true);
+	// 各通道默认值和「只打色情、裸露、血腥暴力」预设一致
+	obs_data_set_default_bool(settings, "scene_enabled", true);
+	obs_data_set_default_bool(settings, "scene_gore", true);
+	obs_data_set_default_bool(settings, "scene_violence", true);
+	obs_data_set_default_int(settings, "scene_threshold", 50);
+	obs_data_set_default_int(settings, "scene_fps", 4);
+
+	obs_data_set_default_bool(settings, "face_enabled", false);
 	obs_data_set_default_double(settings, "threshold", 0.6);
 
 	obs_data_set_default_bool(settings, "nude_enabled", true);
@@ -597,7 +699,7 @@ void fm_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "skin_body", 40);
 	obs_data_set_default_int(settings, "skin_torso", 60);
 
-	obs_data_set_default_bool(settings, "text_enabled", true);
+	obs_data_set_default_bool(settings, "text_enabled", false);
 	for (const char *k : {"text_phone", "text_id_card", "text_bank_card", "text_email", "text_url", "text_im"})
 		obs_data_set_default_bool(settings, k, true);
 	obs_data_set_default_string(settings, "text_keywords", "");
@@ -605,9 +707,39 @@ void fm_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "text_fps", 3);
 }
 
+// 选了「打码范围」预设：把各通道开关改成预设值，并刷新界面让开关显示出来
+bool scope_modified(void *, obs_properties_t *, obs_property_t *, obs_data_t *settings)
+{
+	int scope = (int)obs_data_get_int(settings, "scope");
+	if (scope == SCOPE_NSFW || scope == SCOPE_ALL) {
+		if (!scope_matches(settings, scope))
+			apply_scope(settings, scope);
+		return true;
+	}
+	return false;
+}
+
 obs_properties_t *fm_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
+
+	// 打码范围（预设）
+	obs_property_t *scope = obs_properties_add_list(props, "scope", obs_module_text("Scope"), OBS_COMBO_TYPE_LIST,
+							OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(scope, obs_module_text("Scope.Nsfw"), SCOPE_NSFW);
+	obs_property_list_add_int(scope, obs_module_text("Scope.All"), SCOPE_ALL);
+	obs_property_list_add_int(scope, obs_module_text("Scope.Custom"), SCOPE_CUSTOM);
+	obs_property_set_modified_callback2(scope, scope_modified, nullptr);
+	obs_properties_add_text(props, "scope_info", obs_module_text("ScopeInfo"), OBS_TEXT_INFO);
+
+	// 血腥暴力
+	obs_properties_t *scene = obs_properties_create();
+	obs_properties_add_bool(scene, "scene_gore", obs_module_text("SceneGore"));
+	obs_properties_add_bool(scene, "scene_violence", obs_module_text("SceneViolence"));
+	obs_properties_add_int_slider(scene, "scene_threshold", obs_module_text("SceneThreshold"), 20, 95, 5);
+	obs_properties_add_int_slider(scene, "scene_fps", obs_module_text("SceneFps"), 1, 10, 1);
+	obs_properties_add_text(scene, "scene_info", obs_module_text("SceneInfo"), OBS_TEXT_INFO);
+	obs_properties_add_group(props, "scene_enabled", obs_module_text("SceneEnabled"), OBS_GROUP_CHECKABLE, scene);
 
 	// 不雅内容
 	obs_properties_t *nude = obs_properties_create();
@@ -687,6 +819,7 @@ void *fm_create(obs_data_t *settings, obs_source_t *source)
 	f->ch[CH_NUDE].kind = CH_NUDE;
 	f->ch[CH_SKIN].kind = CH_SKIN;
 	f->ch[CH_TEXT].kind = CH_TEXT;
+	f->ch[CH_SCENE].kind = CH_SCENE;
 	f->cap_small.max_size = kMaxDetectSize;
 	f->cap_text.max_size = kTextCaptureMax;
 
@@ -704,6 +837,8 @@ void *fm_create(obs_data_t *settings, obs_source_t *source)
 	f->seg_model_path = module_file("pphumanseg_2023mar.onnx");
 	f->ocr_det_path = module_file("ch_PP-OCRv4_det_infer.onnx");
 	f->ocr_rec_path = module_file("ch_PP-OCRv4_rec_infer.onnx");
+	f->clip_model_path = module_file("clip_vision_int8.onnx");
+	f->clip_prompts_path = module_file("clip_prompts.bin");
 
 	obs_enter_graphics();
 	char *effect_err = nullptr;
@@ -1147,6 +1282,7 @@ void dump_frames(FaceMosaic *f, gs_texture_t *tex, uint32_t w, uint32_t h, const
 		desc += t.cls == kClsFace   ? "FACE"
 			: t.cls == kClsSkin ? "SKIN"
 			: t.cls == kClsText ? "TEXT"
+			: t.cls == kClsScene ? "SCENE"
 					    : nude_class_name(t.cls);
 		desc += " ";
 	}
@@ -1198,7 +1334,8 @@ void fm_video_render(void *data, gs_effect_t *)
 			uint32_t targets = 0;
 			for (int k = 0; k < CH_COUNT; k++) {
 				Channel &c = f->ch[k];
-				if (k != CH_TEXT && c.enabled && c.model_ok && !c.busy) {
+				if (k != CH_TEXT && c.enabled && c.model_ok && !c.busy &&
+				    elapsed_ns(now, c.last_job_ns) >= c.min_interval_ns) {
 					c.busy = true;
 					c.last_job_ns = now;
 					targets |= 1u << k;
@@ -1240,7 +1377,7 @@ void fm_video_render(void *data, gs_effect_t *)
 	}
 
 	// 兜底判断 + 收集各通道的框
-	bool stalled = false, aligned_all = true, exposed = false;
+	bool stalled = false, aligned_all = true, exposed = false, scene_hit = false;
 	std::vector<Track> boxes;
 	for (Channel &c : f->ch) {
 		if (!c.enabled)
@@ -1255,17 +1392,21 @@ void fm_video_render(void *data, gs_effect_t *)
 
 		bool aligned = false;
 		std::vector<Track> part = boxes_for_frame(&c, out_seq, aligned);
-		if (c.kind != CH_TEXT) // 文字通道每秒只检测几次，不计入对齐统计
+		if (c.kind != CH_TEXT && c.kind != CH_SCENE) // 这两个通道每秒只检测几次，不计入对齐统计
 			aligned_all = aligned_all && aligned;
-		for (const Track &t : part)
+		for (const Track &t : part) {
 			if (t.cls >= 0 && nude_group(t.cls) == G_EXPOSED)
 				exposed = true;
+			if (t.cls == kClsScene)
+				scene_hit = true;
+		}
 		boxes.insert(boxes.end(), part.begin(), part.end());
 	}
 
 	bool by_stall = stalled && f->fail_safe;
 	bool by_exposed = exposed && f->nude_action == 1;
-	bool full_screen = by_stall || by_exposed;
+	bool by_scene = scene_hit;
+	bool full_screen = by_stall || by_exposed || by_scene;
 	draw_output(f, tex, w, h, boxes, full_screen);
 	dump_frames(f, tex, w, h, boxes, full_screen, stalled, out_seq, now);
 
@@ -1275,18 +1416,22 @@ void fm_video_render(void *data, gs_effect_t *)
 		f->rstat_fullscreen++;
 	if (fresh && by_exposed && !by_stall)
 		f->rstat_exposed++;
+	if (fresh && by_scene && !by_stall && !by_exposed)
+		f->rstat_scene++;
 	if (elapsed_ns(now, f->rstat_start_ns) > 10ULL * 1000000000ULL) {
 		if (f->rstat_frames > 0)
 			blog(LOG_INFO,
 			     "[face-mosaic] 最近 10 秒：输出 %d 帧，延迟 %d 帧（%d ms），前后都有检测结果的帧 %.0f%%，"
-			     "兜底整屏 %d 帧，检测到暴露整屏 %d 帧",
+			     "兜底整屏 %d 帧，检测到暴露整屏 %d 帧，检测到血腥暴力整屏 %d 帧",
 			     f->rstat_frames, (int)ring_size - 1, f->delay_ms,
-			     100.0 * f->rstat_aligned / f->rstat_frames, f->rstat_fullscreen, f->rstat_exposed);
+			     100.0 * f->rstat_aligned / f->rstat_frames, f->rstat_fullscreen, f->rstat_exposed,
+			     f->rstat_scene);
 		f->rstat_start_ns = now;
 		f->rstat_frames = 0;
 		f->rstat_aligned = 0;
 		f->rstat_fullscreen = 0;
 		f->rstat_exposed = 0;
+		f->rstat_scene = 0;
 	}
 }
 

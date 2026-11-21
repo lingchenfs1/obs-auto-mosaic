@@ -1,14 +1,23 @@
 # obs-auto-mosaic：OBS 自动马赛克滤镜
 
-给 OBS 里任意视频源加一个「自动马赛克」滤镜：检测到不雅部位、大面积裸露皮肤、敏感文字或人脸，就自动打码（马赛克，或 100% 不透明的黑色色块）。支持 macOS（Apple Silicon）和 Windows 10/11 x64，OBS 33.x；macOS 版在 OBS 33.0.1 上实测，Windows 版由 GitHub Actions 构建、**尚未在 Windows 上实测**。可通过 OBS 虚拟摄像头配合抖音直播伴侣使用。
+给 OBS 里任意视频源加一个「自动马赛克」滤镜：检测到不雅部位、大面积裸露皮肤、血腥暴力画面、敏感文字或人脸，就自动打码（马赛克，或 100% 不透明的黑色色块）。支持 macOS（Apple Silicon）和 Windows 10/11 x64，OBS 33.x；macOS 版在 OBS 33.0.1 上实测，Windows 版由 GitHub Actions 构建、**尚未在 Windows 上实测**。可通过 OBS 虚拟摄像头配合抖音直播伴侣使用。
 
-四个检测通道，各自在独立线程里推理，可分别开关：
+五个检测通道，各自在独立线程里推理。设置最上面的「打码范围」可以一键选择：
+
+| 打码范围 | 开启的通道 |
+|---|---|
+| **只打色情、裸露、血腥暴力**（默认） | 不雅内容（只开「暴露的胸部、生殖器、臀部、肛门」组）、裸露皮肤、血腥暴力 |
+| 全部 | 以上全部，再加人脸、敏感文字，以及不雅内容的「男性赤裸上身、腹部、腋下」组 |
+| 自定义 | 按各通道自己的开关；选了预设后手动改任何一项开关，也会自动变成自定义 |
+
+
 
 | 通道 | 模型 | 作用 |
 |---|---|---|
 | 不雅内容 | [NudeNet](https://github.com/notAI-tech/NudeNet) v3（`320n.onnx` 快速 / `640m.onnx` 精确） | 识别暴露的胸部、生殖器、臀部等 18 类部位 |
 | 裸露皮肤 | [PP-HumanSeg](https://github.com/opencv/opencv_zoo/tree/main/models/human_segmentation_pphumanseg) 人体分割 + 肤色 | 补 NudeNet 的漏检：健美、泳装、光膀子、背影 |
 | 敏感文字 | [PP-OCRv4](https://github.com/PaddlePaddle/PaddleOCR)（[RapidOCR](https://github.com/RapidAI/RapidOCR) 导出的 ONNX） | 手机号、身份证号、银行卡号、邮箱、网址、微信 / QQ 号，以及自定义关键词 |
+| 血腥暴力 | [CLIP](https://github.com/openai/CLIP) ViT-B/32（[Xenova](https://huggingface.co/Xenova/clip-vit-base-patch32) 导出的 int8 ONNX）零样本判别 | 流血伤口、尸体、打斗、持械威胁、暴乱；只判断整个画面，检测到就整屏打码 |
 | 人脸 | [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) | 给路人等人脸打码 |
 
 推理用 [ONNX Runtime](https://onnxruntime.ai/)，可用 GPU 加速（macOS：CoreML；Windows：CUDA 或 DirectML），打码用 GPU 着色器。
@@ -61,7 +70,7 @@ macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个
 |---|---|---|
 | 暴露的胸部、生殖器、臀部、肛门 | FEMALE_BREAST / FEMALE_GENITALIA / MALE_GENITALIA / BUTTOCKS / ANUS _EXPOSED | 开 |
 | 内衣 / 泳装遮盖的胸部、生殖器、臀部 | FEMALE_BREAST / FEMALE_GENITALIA / BUTTOCKS / ANUS _COVERED | 关（普通衣服也会触发；泳装由「裸露皮肤」通道覆盖） |
-| 男性赤裸上身、裸露的腹部、腋下 | MALE_BREAST / BELLY / ARMPITS _EXPOSED | 开 |
+| 男性赤裸上身、裸露的腹部、腋下 | MALE_BREAST / BELLY / ARMPITS _EXPOSED | 关（误报多；大面积裸露交给「裸露皮肤」通道） |
 | 裸露的脚 | FEET_EXPOSED | 关 |
 
 不雅检测灵敏度默认 0.2（宁可多遮）。
@@ -71,7 +80,7 @@ macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个
 1. PP-HumanSeg 把画面里的人分割出来（输入 192×192），按 160 宽的网格分析；
 2. 肤色 = 通用 YCrCb 规则（133≤Cr≤173、77≤Cb≤127）∪ 按每张脸取样的自适应肤色（Cr/Cb 马氏距离 < 3，适应灯光和肤色深浅）；脸本身不计入；
 3. 每个人（分割连通块）算「全身皮肤占比」和「脸下方躯干的皮肤占比」，全身 ≥ 40% 或躯干 ≥ 60% 判定为裸露（两个门槛都可调）；
-4. 判定为裸露的人，身上每块皮肤（不含脸）都打码。
+4. 判定为裸露的人只打**一个**码，包住他身上所有成块的裸露皮肤（不含脸；零星几格的小块忽略）。原来每块皮肤各打一个码，一个人会被切成十几块碎码。
 
 在测试图上的标定结果（`tools/skin-test`）：
 
@@ -82,6 +91,22 @@ macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个
 | 穿衣服的人像 4 张 | 12%~29% | 0%~12% | 不算 |
 | 红蓝条纹球衣 | 28% | 0% | 不算 |
 | 密集人群 | 30% | 37% | 不算 |
+
+## 血腥暴力通道
+
+- CLIP 是图文匹配模型，不用专门训练：把画面和三组英文描述比较——「血腥」（流血伤口、浑身是血、重伤、尸体等 6 条）、「暴力」（打斗、殴打、持枪或持刀威胁、暴乱等 6 条）、「正常」（对照组 20 条，特意放进拳击比赛、射击游戏、红色食物、红色衣服、抗议人群、泳装、健美等容易混淆的内容），对全部描述做 softmax，各组概率相加。
+- 沿长边取左 / 中 / 右三块正方形分别判断、各取最高分（16:9 画面只看中间会漏掉两侧；整幅压扁会把皱眉打电话的人误判成暴力）。
+- 文字描述的向量用 `tools/make-clip-prompts.py` 预先算好存成 `data/scene/clip_prompts.bin`，插件运行时只跑图像模型（int8，85MB，固定 CPU，三块一批约 50 ms，默认每秒 4 次）。
+- 「血腥」「暴力」可分别开关，触发门槛默认 50%；触发后整屏打码至少保持 2 秒。OBS 日志每 10 秒记录检测次数、触发次数和这段时间的最高分（只有数字），方便按实际画面调门槛。
+
+测试图（`tools/scene-test`，不含真实血腥画面，见 `test/violence/SOURCES.md`）：
+
+| 图 | 血腥 | 暴力 | 结果 |
+|---|---|---|---|
+| 仿真伤口化妆 3 张（面具、手腕割伤、烧伤） | 0.98~1.00 | ≤ 0.11 | 整屏打码 |
+| 冲突现场 2 张 | 0.00 | 0.93 / 0.97 | 整屏打码 |
+| 拳击比赛、射击游戏、番茄酱意面、化妆前的人 | ≤ 0.04 | ≤ 0.14 | 不触发 |
+| 穿衣服的人像、健美、沙滩排球、合影、满屏文字等 11 张 | ≤ 0.17 | ≤ 0.21 | 不触发 |
 
 ## 敏感文字通道
 
@@ -107,7 +132,8 @@ macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个
 - NudeNet 主要按色情内容训练，对健美、背影识别差，这部分靠「裸露皮肤」通道补；远景里很小的人（约 20 像素高）两个通道都检不出。
 - 肤色和皮肤相近的衣服（米色、肉色）会抬高皮肤占比；露背装、短裤短裙等介于两者之间的情况没测过，可能需要按实际画面调门槛。
 - 文字通道每秒只检测几次，新出现的文字可能要几百毫秒才被遮住；竖排、倾斜、艺术字、很小的字（低于约 12 像素）可能认不出；号码被拆成多行或中间夹了其他字符时规则匹配不到。
-- 人脸打码默认开启：如果是自己出镜直播，记得关掉，否则自己的脸也会被打码。
+- 血腥暴力只用仿真伤口和新闻冲突照片测过，没有用真实血腥画面验证；电影、游戏里的血腥场景会不会触发、门槛是否合适，需要用实际画面测试。
+- 人脸、敏感文字默认不开（「只打色情、裸露、血腥暴力」预设）；需要时把打码范围选「全部」或「自定义」。
 - Windows 版没有在 Windows 上实测过；macOS 只支持 Apple Silicon。
 
 ## 安装 Windows 版
@@ -163,6 +189,7 @@ cmake --build build --target install-plugin
 | 裸露皮肤 | 约 27 ms |
 | 不雅内容（320n） | 约 33 ms |
 | 敏感文字（每秒 3 次） | 约 80 ms |
+| 血腥暴力（每秒 4 次，CPU） | 约 50 ms |
 
 前三个通道全开时 OBS 进程约占 1.3 个核，加上文字通道约 1.35 个核（含视频解码等 OBS 自身开销）。ONNX Runtime 默认的「2 线程 + 自旋等待」会让 OBS 涨到 2.3~2.7 个核，所以改成了每个模型 1 个线程。调低「每秒检测次数」可以进一步降低占用。
 
@@ -190,6 +217,10 @@ tools/fetch-test-assets.sh
 
 ```bash
 ./build/text-test data/ocr/ch_PP-OCRv4_det_infer.onnx data/ocr/ch_PP-OCRv4_rec_infer.onnx test/text-sample.png out.png "测试敏感词"
+```
+
+```bash
+./build/scene-test data/scene/clip_vision_int8.onnx data/scene/clip_prompts.bin test/violence/*
 ```
 
 在 OBS 里自动实测（会临时切换场景集合，并在结束后恢复 OBS 的 `user.ini`、`global.ini`）：
@@ -228,6 +259,7 @@ python3 -I tools/check-dumps.py "$PWD/build/detect-test" "$PWD/data/face_detecti
 |---|---|
 | NudeNet 模型 | AGPL-3.0 |
 | YuNet、PP-HumanSeg（opencv_zoo） | MIT、Apache-2.0 |
+| CLIP（OpenAI，Xenova 导出的 ONNX） | MIT |
 | PP-OCRv4（PaddleOCR / RapidOCR） | Apache-2.0 |
 | ONNX Runtime、DirectML | MIT |
 | CUDA 运行时、cuBLAS、cuDNN、cuFFT、NVRTC（仅 CUDA 扩展包） | NVIDIA 专有许可，按其许可随扩展包分发，许可证全文在 `ort-cuda/licenses/` |
