@@ -1,6 +1,6 @@
 // 自动马赛克滤镜：人脸 + 不雅内容（NudeNet）+ 裸露皮肤（人体分割 + 肤色）+ 敏感文字（PP-OCRv4）
 //
-// 检测通道：人脸（YuNet）、不雅内容（NudeNet 320n / 640m）、裸露皮肤（PP-HumanSeg + 肤色）、
+// 检测通道：人脸（YuNet）、不雅内容（NudeNet 320n / 640m，默认按显卡实测速度自动选）、裸露皮肤（PP-HumanSeg + 肤色）、
 // 敏感文字（PP-OCR 检测 + 识别 + 规则 / 关键词）各有一个推理线程、自己的检测历史，慢的通道不拖慢快的。
 // 前三个通道共用一份缩到 640 以内的画面；文字通道单独采集一份高分辨率（长边 1920 以内）画面。
 //
@@ -34,6 +34,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -198,6 +199,11 @@ int nude_group(int cls)
 }
 
 const char *kNudeModelFile[2] = {"320n.onnx", "640m.onnx"};
+// 「检测模型」设置：0 = 快速 320n，1 = 精确 640m，2 = 自动（显卡上实测够快就用 640m，否则 320n）
+constexpr int kNudeModelAuto = 2;
+// 自动选择时精确模型每次推理的上限（取实测的最短一次，避开启动时各通道同时加载的争抢）。
+// 检测每秒 15 次（间隔约 67 ms）、画面延迟默认 150 ms，40 ms 以内不影响延迟对齐。
+constexpr double kNudeAutoBudgetMs = 40.0;
 
 // 归一化坐标（0~1）的遮挡框
 struct Track {
@@ -225,7 +231,7 @@ float iou(const Track &a, const Track &b)
 struct Channel {
 	ChannelKind kind = CH_FACE;
 	std::atomic<bool> enabled{false};
-	std::atomic<int> want_model{-1}; // -1 表示不加载；人脸 0；不雅 0 = 320n，1 = 640m
+	std::atomic<int> want_model{-1}; // -1 表示不加载；人脸 0；不雅 0 = 320n，1 = 640m，2 = 自动
 	int loaded_model = -1;           // 只在推理线程读写
 	std::atomic<bool> model_ok{false};
 	FaceDetector face;
@@ -370,12 +376,63 @@ int want_code(int model, int accel)
 	return model < 0 ? -1 : model * 4 + accel;
 }
 
+// 用和画布同比例、长边 640 的灰图实测不雅内容模型一次推理的耗时（毫秒）：
+// 先跑 2 次预热（CUDA 选卷积算法、CoreML 编译都在首次推理），再跑 5 次取最短的一次。
+double time_nude_model(NudeDetector &det)
+{
+	int w = 640, h = 360;
+	obs_video_info ovi;
+	if (obs_get_video_info(&ovi) && ovi.base_width > 0 && ovi.base_height > 0) {
+		double s = (double)kMaxDetectSize / std::max(ovi.base_width, ovi.base_height);
+		w = std::max(32, (int)std::lround(ovi.base_width * s));
+		h = std::max(32, (int)std::lround(ovi.base_height * s));
+	}
+	std::vector<uint8_t> gray((size_t)w * h * 4, 128);
+	for (int i = 0; i < 2; i++)
+		det.detect(gray.data(), w, h, w * 4, 0.9f);
+	double best = 1e9;
+	for (int i = 0; i < 5; i++) {
+		uint64_t t0 = os_gettime_ns();
+		det.detect(gray.data(), w, h, w * 4, 0.9f);
+		best = std::min(best, (os_gettime_ns() - t0) / 1e6);
+	}
+	return best;
+}
+
+// 不雅内容「自动」：能用显卡时先加载精确模型 640m 实测速度，够快就用；
+// 只用 CPU、显卡上建不起来或实测太慢时用快速模型 320n。chosen 写入实际用的模型，note 写入选择理由。
+bool load_nude_auto(FaceMosaic *f, Channel *c, int accel, int &chosen, std::string &note, std::string &err)
+{
+	char buf[160];
+	if (accel != 0 || !*ort_gpu_provider()) {
+		note = "只用 CPU，用快速模型";
+	} else if (!c->nude.load(f->nude_model_path[1], 640, err, accel) || c->nude.provider() == "CPU") {
+		note = "精确模型没能在显卡上运行，改用快速模型";
+		err.clear();
+	} else {
+		double ms = time_nude_model(c->nude);
+		if (ms <= kNudeAutoBudgetMs) {
+			snprintf(buf, sizeof(buf), "显卡上实测每次 %.0f ms，用精确模型", ms);
+			note = buf;
+			chosen = 1;
+			return true;
+		}
+		snprintf(buf, sizeof(buf), "精确模型实测每次 %.0f ms，超过 %.0f ms，改用快速模型", ms,
+			 kNudeAutoBudgetMs);
+		note = buf;
+	}
+	chosen = 0;
+	return c->nude.load(f->nude_model_path[0], 640, err, accel);
+}
+
 void load_model(FaceMosaic *f, Channel *c, int want)
 {
 	const int model = want < 0 ? -1 : want / 4;
 	const int accel = want < 0 ? 1 : want % 4;
 	bool ok = false;
 	std::string err;
+	std::string note;       // 自动选模型的理由
+	int nude_file = model;  // 不雅内容实际加载的模型文件
 	uint64_t t0 = os_gettime_ns();
 	if (!ort_runtime_ready()) {
 		err = "ONNX Runtime 没有初始化成功（见插件加载时的日志）";
@@ -383,7 +440,9 @@ void load_model(FaceMosaic *f, Channel *c, int want)
 		if (model >= 0)
 			ok = c->face.load(f->face_model_path, err, accel);
 	} else if (c->kind == CH_NUDE) {
-		if (model >= 0 && model < 2)
+		if (model == kNudeModelAuto)
+			ok = load_nude_auto(f, c, accel, nude_file, note, err);
+		else if (model >= 0 && model < 2)
 			ok = c->nude.load(f->nude_model_path[model], 640, err, accel);
 		else
 			c->nude.load("", 640, err); // 加载空路径会失败，相当于卸载
@@ -413,13 +472,14 @@ void load_model(FaceMosaic *f, Channel *c, int want)
 				      : c->kind == CH_TEXT ? c->text.provider()
 							   : std::string("CPU");
 	if (ok)
-		blog(LOG_INFO, "[face-mosaic] %s模型已加载（%s，%s），用时 %.0f ms", kChannelName[c->kind],
+		blog(LOG_INFO, "[face-mosaic] %s模型已加载（%s，%s），用时 %.0f ms%s%s", kChannelName[c->kind],
 		     c->kind == CH_FACE   ? "YuNet"
-		     : c->kind == CH_NUDE ? kNudeModelFile[model]
+		     : c->kind == CH_NUDE ? kNudeModelFile[nude_file]
 		     : c->kind == CH_SKIN ? "PP-HumanSeg + YuNet"
 		     : c->kind == CH_TEXT ? "PP-OCRv4"
 					  : "CLIP ViT-B/32 int8",
-		     provider.c_str(), (os_gettime_ns() - t0) / 1e6);
+		     provider.c_str(), (os_gettime_ns() - t0) / 1e6, note.empty() ? "" : "；自动选择：",
+		     note.c_str());
 	else
 		blog(LOG_ERROR, "[face-mosaic] %s模型加载失败：%s", kChannelName[c->kind], err.c_str());
 }
@@ -636,7 +696,7 @@ void fm_update(void *data, obs_data_t *settings)
 	f->nude_groups = groups;
 	f->nude_action = (int)obs_data_get_int(settings, "nude_action");
 	bool nude_on = obs_data_get_bool(settings, "nude_enabled");
-	int nude_model = std::clamp((int)obs_data_get_int(settings, "nude_model"), 0, 1);
+	int nude_model = std::clamp((int)obs_data_get_int(settings, "nude_model"), 0, kNudeModelAuto);
 	f->ch[CH_NUDE].enabled = nude_on;
 	set_want_model(&f->ch[CH_NUDE], want_code(nude_on ? nude_model : -1, accel));
 
@@ -689,7 +749,7 @@ void fm_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "threshold", 0.6);
 
 	obs_data_set_default_bool(settings, "nude_enabled", true);
-	obs_data_set_default_int(settings, "nude_model", 0);
+	obs_data_set_default_int(settings, "nude_model", kNudeModelAuto);
 	obs_data_set_default_double(settings, "nude_threshold", 0.2);
 	obs_data_set_default_int(settings, "nude_action", 0);
 	for (int g = 0; g < G_COUNT; g++)
@@ -745,6 +805,7 @@ obs_properties_t *fm_properties(void *data)
 	obs_properties_t *nude = obs_properties_create();
 	obs_property_t *model = obs_properties_add_list(nude, "nude_model", obs_module_text("NudeModel"),
 							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(model, obs_module_text("NudeModel.Auto"), kNudeModelAuto);
 	obs_property_list_add_int(model, obs_module_text("NudeModel.Fast"), 0);
 	obs_property_list_add_int(model, obs_module_text("NudeModel.Accurate"), 1);
 	obs_properties_add_float_slider(nude, "nude_threshold", obs_module_text("NudeThreshold"), 0.1, 0.9, 0.05);

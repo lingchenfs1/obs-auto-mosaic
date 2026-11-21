@@ -1,5 +1,5 @@
 // 离线测试 NudeNet：读图片，检测后把框打码写出 PNG，并打印每个框。
-// 用法：nude-test <模型.onnx> <输入尺寸 320|640> <输入图片> <输出.png> [最低分数]
+// 用法：nude-test <模型.onnx> <输入尺寸 320|640> <输入图片> <输出.png> [最低分数] [gpu]
 #include "nude-detector.hpp"
 #include "ort-runtime.hpp"
 
@@ -16,7 +16,7 @@ int main(int argc, char **argv)
 	std::string ort_info;
 	ort_runtime_init("", ort_info); // 测试工具只在 macOS 构建，直接用链接进来的运行库
 	if (argc < 5) {
-		fprintf(stderr, "用法：%s <模型.onnx> <输入尺寸> <输入图片> <输出.png> [最低分数]\n", argv[0]);
+		fprintf(stderr, "用法：%s <模型.onnx> <输入尺寸> <输入图片> <输出.png> [最低分数] [gpu]\n", argv[0]);
 		return 2;
 	}
 	int size = atoi(argv[2]);
@@ -24,7 +24,8 @@ int main(int argc, char **argv)
 
 	NudeDetector det;
 	std::string err;
-	if (!det.load(argv[1], size, err)) {
+	const bool gpu = argc > 6 && std::string(argv[6]) == "gpu";
+	if (!det.load(argv[1], size, err, gpu ? 0 : 1)) {
 		fprintf(stderr, "模型加载失败：%s\n", err.c_str());
 		return 1;
 	}
@@ -35,13 +36,13 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	std::vector<NudeBox> boxes;
+	std::vector<NudeBox> boxes = det.detect(img, w, h, w * 4, min_score); // 预热（GPU 首次推理要编译）
 	const int runs = 10;
 	auto t0 = std::chrono::steady_clock::now();
 	for (int i = 0; i < runs; i++)
 		boxes = det.detect(img, w, h, w * 4, min_score);
 	double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / runs;
-	printf("%s %dx%d，平均每次 %.1f ms，%zu 个框\n", argv[3], w, h, ms, boxes.size());
+	printf("%s %dx%d，%s，平均每次 %.1f ms，%zu 个框\n", argv[3], w, h, det.provider().c_str(), ms, boxes.size());
 
 	for (const NudeBox &b : boxes) {
 		printf("  %-26s %.2f  x=%.0f y=%.0f w=%.0f h=%.0f\n", nude_class_name(b.cls), b.score, b.x, b.y, b.w,
