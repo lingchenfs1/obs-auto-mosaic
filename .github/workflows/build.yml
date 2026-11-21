@@ -66,10 +66,21 @@ jobs:
           Compress-Archive -Path build/package-cuda/* -DestinationPath obs-auto-mosaic-windows-cuda-addon.zip
           Get-ChildItem *.zip | Format-Table Name, Length
 
+      - name: 生成一键安装程序（NSIS，含 CUDA 组件，可在安装时勾选）
+        shell: pwsh
+        run: |
+          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev" }
+          makensis /V2 "/DVERSION=$ver" "/DPKG=$pwd\build\package" "/DPKG_CUDA=$pwd\build\package-cuda" `
+            "/DREADME=$pwd\packaging\windows\README-Windows.txt" `
+            "/DOUTFILE=$pwd\obs-auto-mosaic-windows-x64-installer.exe" packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem *.exe | Format-Table Name, Length
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
           path: |
+            obs-auto-mosaic-windows-x64-installer.exe
             obs-auto-mosaic-windows-x64.zip
             obs-auto-mosaic-windows-cuda-addon.zip
 
@@ -118,4 +129,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: true
-          files: "*.zip"
+          files: |
+            *.exe
+            *.zip

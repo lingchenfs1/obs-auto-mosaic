@@ -112,16 +112,18 @@ macOS 上的实测（M4，1080p 60fps 测试视频，四个通道全开，每个
 
 ## 安装 Windows 版
 
-从 [Releases](https://github.com/lingchenfs1/obs-auto-mosaic/releases) 或 GitHub Actions 的构建产物下载：
+从 [Releases](https://github.com/lingchenfs1/obs-auto-mosaic/releases) 下载 **`obs-auto-mosaic-windows-x64-installer.exe`**（一键安装程序，约 1.3GB），双击按向导安装即可：
 
-- `obs-auto-mosaic-windows-x64.zip`：主包（含 DirectML 运行库和全部模型）；
-- `obs-auto-mosaic-windows-cuda-addon.zip`：可选的英伟达 CUDA 扩展包（约 1GB，自带 CUDA 13 和 cuDNN 9 运行库）。
+- 装到 OBS 第三方插件目录 `C:\ProgramData\obs-studio\plugins\obs-face-mosaic`，会检查 64 位系统、是否装了 OBS、OBS 是否在运行；
+- 「英伟达 CUDA 加速」是可选组件（自带 CUDA 13 和 cuDNN 9），检测到英伟达显卡驱动时默认勾选；
+- 可在「设置 → 应用」里卸载；
+- 安装程序没有数字签名，Windows 可能提示「已保护你的电脑」，点「更多信息 → 仍要运行」。
 
-解压后按里面的 `README-Windows.txt` 安装：把 `obs-face-mosaic` 文件夹复制到 `C:\ProgramData\obs-studio\plugins\`（或以管理员身份运行 `install.ps1`）。
+也可以手动安装：`obs-auto-mosaic-windows-x64.zip`（主包）+ 可选的 `obs-auto-mosaic-windows-cuda-addon.zip`，按包里的 `README-Windows.txt` 把 `obs-face-mosaic` 文件夹复制到插件目录（或以管理员身份运行 `install.ps1`）。
 
 ## 构建 Windows 版
 
-由 `.github/workflows/build.yml` 在 GitHub Actions 的 `windows-2022` 上完成：`tools/fetch-deps.sh`（Git Bash）下载 OBS 发布包里的 `obs.dll`、两套 ONNX Runtime 和 DirectML.dll，`tools/make-import-lib.py` 用 `dumpbin` / `lib` 从 `obs.dll` 生成导入库，再用 Visual Studio 2022 构建并打包。推 `v*` 标签时自动建 Release。
+由 `.github/workflows/build.yml` 在 GitHub Actions 的 `windows-2022` 上完成：`tools/fetch-deps.sh`（Git Bash）下载 OBS 发布包里的 `obs.dll`、两套 ONNX Runtime 和 DirectML.dll，`tools/make-import-lib.py` 用 `dumpbin` / `lib` 从 `obs.dll` 生成导入库，再用 Visual Studio 2022 构建并打包，最后用 NSIS（`packaging/windows/installer.nsi`）生成一键安装程序。推 `v*` 标签时自动建 Release。
 
 ## 构建（macOS，Apple Silicon）
 

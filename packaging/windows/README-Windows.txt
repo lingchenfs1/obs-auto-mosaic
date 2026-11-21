@@ -10,20 +10,27 @@
   - 支持 DirectX 12 的显卡（英伟达、AMD、Intel 都可以）。没有可用的显卡时自动用 CPU。
 
 二、安装
-  1. 先完全退出 OBS。
-  2. 任选一种方式：
-     a) 右键「开始」→「终端（管理员）」或「Windows PowerShell（管理员）」，进入本文件所在目录，运行：
+  推荐：一键安装程序 obs-auto-mosaic-windows-x64-installer.exe
+  1. 先完全退出 OBS（包括系统托盘里的图标）。
+  2. 双击运行安装程序。程序没有数字签名，Windows 可能提示「Windows 已保护你的电脑」：
+     点「更多信息」→「仍要运行」。
+  3. 按向导点「下一步」。「英伟达 CUDA 加速」组件在检测到英伟达显卡驱动时默认勾选，
+     不需要可以取消（不装也能用 DirectML 显卡加速）。
+  4. 卸载：「设置」→「应用」里找到「obs-auto-mosaic（OBS 自动马赛克插件）」卸载。
+
+  也可以用压缩包手动安装（obs-auto-mosaic-windows-x64.zip）：
+     a) 右键「开始」→「终端（管理员）」或「Windows PowerShell（管理员）」，进入解压目录，运行：
           powershell -ExecutionPolicy Bypass -File .\install.ps1
-     b) 手动复制：把本压缩包里的 obs-face-mosaic 文件夹整个复制到
-          C:\ProgramData\obs-studio\plugins\
-        （没有 plugins 文件夹就新建；复制后的路径应是
-          C:\ProgramData\obs-studio\plugins\obs-face-mosaic\bin\64bit\obs-face-mosaic.dll）
-  3. 打开 OBS，在要处理的来源（或场景）上右键 →「滤镜」→「效果滤镜」→「+」→「自动马赛克」。
+     b) 或把 obs-face-mosaic 文件夹整个复制到 C:\ProgramData\obs-studio\plugins\
+        （复制后的路径应是 C:\ProgramData\obs-studio\plugins\obs-face-mosaic\bin\64bit\obs-face-mosaic.dll）
+
+  装好后打开 OBS，在要处理的来源（或场景）上右键 →「滤镜」→「效果滤镜」→「+」→「自动马赛克」。
 
 三、英伟达显卡加速（可选，更快）
   默认用 DirectML（显卡通用，不用额外安装）。想用 CUDA（RTX 20 系列或更新的英伟达显卡）：
   1. 把显卡驱动更新到 580 系列或更新。
-  2. 下载 obs-auto-mosaic-windows-cuda-addon.zip（约 1GB，已自带 CUDA 13 和 cuDNN 9，不用另装），
+  2. 用一键安装程序时勾选「英伟达 CUDA 加速」组件即可（已自带 CUDA 13 和 cuDNN 9，不用另装）；
+     手动安装时下载 obs-auto-mosaic-windows-cuda-addon.zip（约 1.2GB），
      把里面的 obs-face-mosaic 文件夹复制到同一位置（和原来的合并）。
   插件启动时先用 CUDA 实际跑一次模型，跑通才用 CUDA，否则自动换回 DirectML。
 
@@ -49,7 +56,8 @@
         否则这些画面不会被打码。
 
 五、卸载
-  退出 OBS，删除 C:\ProgramData\obs-studio\plugins\obs-face-mosaic 文件夹。
+  用安装程序装的：「设置」→「应用」里卸载「obs-auto-mosaic（OBS 自动马赛克插件）」。
+  手动装的：退出 OBS，删除 C:\ProgramData\obs-studio\plugins\obs-face-mosaic 文件夹。
 
 六、已知情况
   - Windows 版由 GitHub Actions 自动构建，作者没有在 Windows 上实测过；遇到问题请附上 OBS 日志里
